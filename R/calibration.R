@@ -11,9 +11,10 @@
 # are refused loudly rather than silently coerced into flattering numbers.
 #
 # Statistical notes / limitations (read before quoting a number):
-#   * These are the classic equal-width bin definitions (Naeini et al. / Guo et
-#     al.), NOT the calibration-error-with-bias-correction of Nixon et al. 2022
-#     and no equal-mass ("adaptive") variant.
+#   * These are the classic equal-width bin definitions (Naeini et al. 2015;
+#     popularised by Guo et al. 2017), NOT the debiased estimator of Roelofs
+#     et al. (AISTATS 2022) nor the adaptive ACE of Nixon et al. (arXiv
+#     1904.01685, 2019), and no equal-mass ("adaptive") variant.
 #   * Bins are half-open intervals (a, b] except the lowest, which includes 0
 #     (include.lowest). Probabilities outside [0, 1] are dropped and reported in
 #     attr(, "n_out_of_range").
