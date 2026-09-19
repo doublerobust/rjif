@@ -1,0 +1,4 @@
+^.*\.bak$
+^results/
+^\.Rhistory
+^USE_CASES\.md
