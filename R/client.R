@@ -116,43 +116,50 @@ jev_key <- function() {
            call. = FALSE)
     }
   }
-  # deep-redact every string in the response (names and values): an opaque API
-  # key echoed anywhere in the body must not survive into printed output.
-  # SHAPE PRESERVATION (audit R2-M1): an unnamed list (a JSON array decoded
-  # with simplifyVector = FALSE has names = NULL) must come out with names
-  # still NULL -- assigning names<-NULL via character(0) previously turned it
-  # into c(NA, NA) and broke positional probability vectors. Redact names only
-  # when they exist; apply .scrub_secrets too, not just the exact-key match.
-  redact_deep <- function(x) {
-    if (is.character(x)) {
-      # P29/R3-B2: gsub preserves names, so scrubbing VALUES only left the
-      # exact key alive as a vector NAME. Scrub names here too, keeping NULL
-      # names NULL (shape preservation, R2-M1).
-      nm <- names(x)
-      x <- .scrub_secrets(.redact_key(x))
-      if (!is.null(nm)) names(x) <- .scrub_secrets(.redact_key(nm))
-      return(x)
+  # R4-M1/R4-B2: .as_response deliberately does NOT redact content anymore.
+  # Semantic validation must run on the representation the transport actually
+  # sent (scrubbing probability names before setequal made a valid distribution
+  # unusable), and recursive scrubbing of classed list-like objects (POSIXlt)
+  # before validation blew the C stack. Redaction now happens ONCE, at the
+  # retention boundary, via .redact_value() on the object jev_eval returns.
+  obj
+}
+
+# Sanitize an R object for RETENTION/PRINTING (audit R4-B2 closure): scrub the
+# live API key and secret patterns from every character value, every character
+# ATTRIBUTE (names, class, factor levels, anything user-named), recursively,
+# with a depth cap so classed list-like objects whose elements are instances of
+# themselves (POSIXlt is a list whose isdst element is again a length-1 POSIXlt)
+# cannot exhaust the C stack. This runs AFTER validation, so checks always see
+# the consistent pre-redaction representation (R4-M1).
+.redact_value <- function(x, depth = 0L) {
+  if (depth > 24L) return("[REDACTED-DEPTH]")
+  scrub <- function(s) if (is.character(s))
+    .scrub_secrets(.redact_key(s)) else s
+  if (is.character(x)) {
+    attrs <- attributes(x)
+    x <- scrub(x)
+    if (length(attrs)) {
+      for (an in names(attrs)) attributes(x)[[an]] <- scrub(attrs[[an]])
     }
-    if (is.factor(x)) {
-      # P33: a factor's key can hide in its levels attribute; levels are
-      # textual representation, scrub them in place.
-      lv <- .scrub_secrets(.redact_key(levels(x)))
-      x <- factor(as.character(x), levels = unique(lv))
-      return(x)
-    }
-    if (is.list(x)) {
-      nm <- names(x)
-      if (!is.null(nm)) names(x) <- .scrub_secrets(.redact_key(as.character(nm)))
-      return(lapply(x, redact_deep))
-    }
-    if (is.atomic(x) && !is.null(names(x))) {
-      # named atomic vector (pluggable transports may return these): redact
-      # the names, leave the values and vector shape untouched
-      names(x) <- .scrub_secrets(.redact_key(as.character(names(x))))
-    }
-    x
+    return(x)
   }
-  redact_deep(obj)
+  if (is.list(x)) {
+    attrs <- attributes(x)
+    x <- lapply(x, .redact_value, depth = depth + 1L)
+    # classed lists (POSIXlt, data.frame, ...) keep their structure but their
+    # character attributes are scrubbed; restoring attributes cannot reintroduce
+    # a key because every string attribute went through scrub()
+    if (length(attrs)) {
+      for (an in names(attrs)) attributes(x)[[an]] <- scrub(attrs[[an]])
+    }
+    return(x)
+  }
+  if (!is.null(attributes(x))) {
+    attrs <- attributes(x)
+    for (an in names(attrs)) attributes(x)[[an]] <- scrub(attrs[[an]])
+  }
+  x
 }
 
 # Answer values accepted by the client, given the question that was sent.
@@ -217,10 +224,11 @@ jev_key <- function() {
     vals
   } else if (is.numeric(pv)) {
     as.double(pv)
-  } else if (is.logical(pv)) {
-    NULL
   } else {
-    suppressWarnings(as.double(pv))
+    # R4-B1: no catch-all coercion. Character ("0.9"), complex, raw, factor,
+    # logical and temporal vectors are REJECTED, not silently as.double()'d.
+    # Only a numeric vector or a list of numerics is a probability distribution.
+    NULL
   }
 }
 
@@ -252,17 +260,19 @@ jev_answer_valid <- function(ans, q) {
   if (is.null(field)) {
     return(invalid(paste0("unknown question type '", as.character(q$type)[[1L]], "'")))
   }
-  v <- ans[[field]]
-  if (is.list(v) && length(v) == 1L) v <- v[[1L]]   # unwrap a 1-element JSON array
+  v <- .unwrap_scalar(ans[[field]])   # ONLY unnamed 1-element JSON arrays wrap a
+  # scalar; a named object like {wrong: 0.9} is rejected here, not unwrapped
+  # (audit R4-B1: this was the last catch-all path left from round 3).
   if (q$type == "choice") {
     if (is.null(v) || !is.character(v) || length(v) != 1L || is.na(v)) {
       return(invalid("choice is not a single non-NA string"))
     }
   } else {
-    if (is.null(v) || !is.atomic(v) || length(v) != 1L || is.na(v) ||
-        is.logical(v) || is.complex(v)) {
-      return(invalid(paste0(field, " is not a single non-NA ",
-                            if (q$type == "noul") "number" else "number")))
+    if (is.null(v) || !is.numeric(v) || length(v) != 1L || is.na(v)) {
+      # is.numeric excludes logical, character ("0.9"), complex, raw, factor,
+      # Date and POSIXt -- every representation-dependent coercion in the
+      # round-3 audit died here (N14-N17, M07-M09).
+      return(invalid(paste0(field, " is not a single non-NA number")))
     }
   }
   # supplied confidence, validated but NOT trusted for gating: jprob()/floor
@@ -528,6 +538,12 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
       raw        = a
     ), class = c(paste0("jev_", qtype), "jev_answer"))
   })
+  # RETENTION boundary (R4-B2): after validation has run on the consistent
+  # pre-redaction representation, scrub the live key from every retained
+  # string, name, class and factor-level attribute, depth-capped. Whatever the
+  # transport handed back, nothing key-bearing escapes into dput/serialize/
+  # print of the answer objects.
+  ans <- lapply(ans, .redact_value)
   names(ans) <- names(questions)
   structure(ans, model = .as_scalar(raw[["model"]], "character") %||% model,
             class = "jev_answers")

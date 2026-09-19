@@ -706,6 +706,77 @@ if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
   do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
 
 # ===========================================================================
+cat("\n14. round-4 audit regressions (Astra R4-B1/B2, R4-M1/M2)\n")
+fake_key <- "astra_R4_FAKE_opaque_7Qa9"
+old_env_key <- Sys.getenv("TYPESAFE_API_KEY", unset = NA)
+Sys.setenv(TYPESAFE_API_KEY = fake_key)
+key_leak4 <- function(x) any(grepl(fake_key, capture.output(dput(x)), fixed = TRUE))
+expect("named 1-element OBJECT cannot impersonate a scalar noul wrapper (R4-B1)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(noul = list(wrong = 1)))),
+           jev_eval("s", list(q = jev_noul_q("x"))))$q)
+         is.na(jvalue(a)) && !is.na(a$contract) })
+expect("named object score value rejected; 30 such rows leave analytics with used=0 (R4-B1/M01)",
+       # the WHOLE scenario runs inside one withr_options scope: withr_options
+       # restores the transport when expr finishes, so calling jev_score_many
+       # after the block would silently hit the outer mock transport (this was
+       # a test bug, not a package bug -- the bad rows were never re-malformed)
+       withr_options(
+         Rjif.transport = function(body)
+           list(answers = list(q = list(score = list(wrong = 2), confidence = 1))), {
+           a <- suppressWarnings(jev_eval("s", list(q = jev_score_q(
+             "i", c("none", "mild", "severe"))))$q)
+           rejected <- is.na(jvalue(a))
+           df <- suppressWarnings(jev_score_many(rep("narr", 30),
+                    jev_score_q("i", c("none", "mild", "severe"))))
+           df$truth <- TRUE
+           rejected && identical(attr(reliability_curve(df), "n_used"), 0L) &&
+             is.na(suppressWarnings(ece(df)))
+         }) )
+expect("string/Date/POSIXt/raw/complex values and probability vectors are REJECTED, not coerced (R4-B1 N14-N17)",
+       all(vapply(list(
+         list(q = list(noul = "0.9")),
+         list(q = list(noul = as.Date(0.9, origin = "1970-01-01"))),
+         list(q = list(noul = as.POSIXct(0.9, origin = "1970-01-01", tz = "UTC"))),
+         list(q = list(choice = "safety", probabilities = c(safety = "0.9",
+                                                            routine = "0.1"))),
+         list(q = list(choice = "safety", probabilities = c(safety = 1 + 4i,
+                                                            routine = 0 + 0i)))),
+         function(aa) {
+           qs <- if (!is.null(aa$q$noul)) jev_noul_q("x") else
+                   jev_choice_q("i", list(safety = "a", routine = "b"))
+           a <- suppressWarnings(withr_options(
+             Rjif.transport = function(body) list(answers = aa),
+             jev_eval("s", list(q = qs)))$q)
+           is.na(jvalue(a))
+         }, logical(1))))
+expect("a key-bearing class attribute cannot survive retention (R4-B2 M02)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(noul = structure(1, class = fake_key)))),
+           jev_eval("s", list(q = jev_noul_q("x")))$q))
+         !key_leak4(a) })
+expect("redaction runs AFTER validation: key-bearing offered option name keeps p=0.9 usable AND absent from output (R4-M1)",
+       { offered <- list(safety = "a", routine = "b"); names(offered)[1] <- fake_key
+         a <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(choice = "routine", probabilities =
+                 stats::setNames(list(0.1, 0.9), c(fake_key, "routine"))))),
+           jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
+         identical(jvalue(a), "routine") && isTRUE(all.equal(jprob(a), 0.9)) &&
+           is.na(a$contract) && !key_leak4(a) })
+expect("POSIXlt in an answer cannot exhaust the redactor's stack (R4-M2)",
+       { lt <- as.POSIXlt(as.POSIXct(0.9, origin = "1970-01-01", tz = "UTC"))
+         got <- tryCatch(withr_options(
+           Rjif.transport = function(body) list(answers = list(q = list(noul = lt))),
+           jev_eval("s", list(q = jev_noul_q("x")))),
+           error = function(e) conditionMessage(e))
+         !(is.character(got) && grepl("C stack|stack limit", got)) })
+if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
+  do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
+
+# ===========================================================================
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
