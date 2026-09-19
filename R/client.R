@@ -125,40 +125,53 @@ jev_key <- function() {
   obj
 }
 
-# Sanitize an R object for RETENTION/PRINTING (audit R4-B2 closure): scrub the
-# live API key and secret patterns from every character value, every character
-# ATTRIBUTE (names, class, factor levels, anything user-named), recursively,
-# with a depth cap so classed list-like objects whose elements are instances of
-# themselves (POSIXlt is a list whose isdst element is again a length-1 POSIXlt)
-# cannot exhaust the C stack. This runs AFTER validation, so checks always see
-# the consistent pre-redaction representation (R4-M1).
+# Sanitize an R object for RETENTION/PRINTING (audit R4-B2/R5-B3): scrub the
+# live API key and secret patterns from every character value AND every
+# character attribute, recursively (dimnames are lists of character vectors;
+# factor levels are a character attribute whose integer codes stay untouched),
+# with a depth cap so classed list-like objects whose elements are instances
+# of themselves (POSIXlt) cannot exhaust the C stack. Runs AFTER validation,
+# so semantic checks always see the consistent pre-redaction representation
+# (R4-M1).
+#
+# Unsupported reference types (functions, environments, calls, symbols,
+# pairlists, weak refs, S4, external pointers) are REPLACED by a redacted
+# placeholder rather than traversed (R5-B3: an environment can hold a key no
+# string scrubber reaches; constraining the retained representation is the
+# auditor-accepted repair).
 .redact_value <- function(x, depth = 0L) {
   if (depth > 24L) return("[REDACTED-DEPTH]")
-  scrub <- function(s) if (is.character(s))
-    .scrub_secrets(.redact_key(s)) else s
-  if (is.character(x)) {
-    attrs <- attributes(x)
-    x <- scrub(x)
-    if (length(attrs)) {
-      for (an in names(attrs)) attributes(x)[[an]] <- scrub(attrs[[an]])
+  if (!is.null(x) && (is.function(x) || is.environment(x) || is.name(x) ||
+      is.call(x) || is.pairlist(x) || isS4(x) ||
+      typeof(x) %in% c("weakref", "externalptr", "char", "..."))) {
+    return(paste0("[REDACTED-", paste(class(x), collapse = "/"), "]"))
+  }
+  scrub_attr <- function(a, d) {
+    if (is.character(a)) return(.scrub_secrets(.redact_key(a)))
+    if (is.list(a)) {
+      if (d > 24L) return("[REDACTED-DEPTH]")
+      out <- lapply(a, scrub_attr, d = d + 1L)
+      nm <- names(a)
+      if (!is.null(nm)) names(out) <- .scrub_secrets(.redact_key(nm))
+      return(out)
     }
-    return(x)
+    if (d > 24L) return("[REDACTED-DEPTH]")
+    a   # non-text attributes (dim, codes) cannot carry a character secret
+  }
+  scrub_attrs <- function(x, y) {
+    attrs <- attributes(x)
+    for (an in names(attrs)) attributes(y)[[an]] <- scrub_attr(attrs[[an]], 1L)
+    y
+  }
+  if (is.character(x)) {
+    y <- .scrub_secrets(.redact_key(x))
+    return(scrub_attrs(x, y))
   }
   if (is.list(x)) {
-    attrs <- attributes(x)
-    x <- lapply(x, .redact_value, depth = depth + 1L)
-    # classed lists (POSIXlt, data.frame, ...) keep their structure but their
-    # character attributes are scrubbed; restoring attributes cannot reintroduce
-    # a key because every string attribute went through scrub()
-    if (length(attrs)) {
-      for (an in names(attrs)) attributes(x)[[an]] <- scrub(attrs[[an]])
-    }
-    return(x)
+    y <- lapply(x, .redact_value, depth = depth + 1L)
+    return(scrub_attrs(x, y))
   }
-  if (!is.null(attributes(x))) {
-    attrs <- attributes(x)
-    for (an in names(attrs)) attributes(x)[[an]] <- scrub(attrs[[an]])
-  }
+  if (!is.null(attributes(x))) return(scrub_attrs(x, x))
   x
 }
 
@@ -516,13 +529,30 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
 
   ans <- lapply(names(questions), function(nm) {
     a <- raw[["answers"]][[nm]]
-    if (is.null(a)) stop("Rjif: missing answer for question '", nm, "'.", call. = FALSE)
+    # R5-B2: nm may itself be a caller-supplied key-bearing question name, and
+    # checked$reason may echo a key from the response; scrub before SIGNALING,
+    # because scrubbing the eventual answer cannot retract an emitted warning.
+    if (is.null(a)) {
+      stop(.clean_error_text(paste0("Rjif: missing answer for question '", nm, "'.",
+                                    collapse = "")),
+           call. = FALSE)
+    }
     qtype <- questions[[nm]]$type
     checked <- jev_answer_valid(a, questions[[nm]])
     if (!isTRUE(checked$valid)) {
-      warning("Rjif: answer for question '", nm, "' violated the API contract (",
-              checked$reason, "); treated as no answer (NA).", call. = FALSE)
+      warning(.clean_error_text(paste0(
+        "Rjif: answer for question '", nm, "' violated the API contract (",
+        checked$reason, "); treated as no answer (NA).", collapse = "")),
+        call. = FALSE)
     }
+    # R5-B1: carry the SELECTED option's probability as an independent scalar,
+    # bound before any display redaction can merge duplicate sanitized names.
+    # jprob() reads this instead of re-looking-up the (possibly redacted) label,
+    # which previously could return a sibling's 0.9 for a selected 0.1.
+    selected_p <- if (qtype == "choice" && isTRUE(checked$valid)) {
+      pv <- .prob_values_bound(checked$probs, checked$value)
+      pv
+    } else NA_real_
     # legend only exists on an OBJECT answer; an atomic one (.99) must not
     # crash on subsetting (audit R2-m1) -- the contract violation already
     # forced value/confidence to NA above.
@@ -532,21 +562,36 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
       type       = qtype,
       value      = checked$value,
       probs      = checked$probs,
+      selected_p = selected_p,
       confidence = checked$confidence,
       contract   = if (isTRUE(checked$valid)) NA_character_ else checked$reason,
       legend     = legend,
       raw        = a
     ), class = c(paste0("jev_", qtype), "jev_answer"))
   })
-  # RETENTION boundary (R4-B2): after validation has run on the consistent
-  # pre-redaction representation, scrub the live key from every retained
-  # string, name, class and factor-level attribute, depth-capped. Whatever the
-  # transport handed back, nothing key-bearing escapes into dput/serialize/
-  # print of the answer objects.
+  # RETENTION boundary (R4-B2/R5-B3): validation ran on the consistent
+  # pre-redaction representation; now scrub the live key from EVERYTHING that
+  # leaves jev_eval -- answer objects, their names, and the model attribute --
+  # depth-capped. Nothing key-bearing escapes into dput/serialize/print/RDS.
   ans <- lapply(ans, .redact_value)
-  names(ans) <- names(questions)
-  structure(ans, model = .as_scalar(raw[["model"]], "character") %||% model,
+  names(ans) <- .scrub_secrets(.redact_key(as.character(names(questions))))
+  structure(ans,
+            model = .scrub_secrets(.redact_key(
+              as.character(.as_scalar(raw[["model"]], "character") %||% model))),
             class = "jev_answers")
+}
+
+# Probability bound to the selected label, captured BEFORE any display
+# redaction (R5-B1). The list values are what jprob() uses for a choice answer.
+.prob_values_bound <- function(probs, selected) {
+  if (is.null(probs) || is.null(selected) || is.na(selected)) return(NA_real_)
+  p <- probs[[selected]]
+  # probs[[selected]] uses exact matching here; if duplicate labels existed they
+  # could only have come from the TRANSPORT itself and were already rejected by
+  # anyDuplicated(pn) in the validator, so this indexes a unique label.
+  if (is.list(p)) p <- p[[1L]]
+  p <- suppressWarnings(as.double(p))
+  if (length(p) != 1L) NA_real_ else p
 }
 
 # Null/empty/NA coalesce. base R only ships `%||%` from 4.4. This variant
@@ -583,9 +628,16 @@ jprob <- function(ans) {
   out <- switch(ans$type,
     noul   = suppressWarnings(as.double(jvalue(ans))),
     choice = {
-      v <- jvalue(ans)
-      if (is.na(v) || is.null(ans$probs)) NA_real_
-      else suppressWarnings(as.double(ans$probs[[v]]))
+      # R5-B1: use the scalar bound at construction time, BEFORE display
+      # redaction could merge two sanitized labels; a label re-lookup could
+      # return a sibling option's probability for the selected option.
+      sp <- ans$selected_p
+      if (!is.null(sp) && is.numeric(sp) && length(sp) == 1L) sp
+      else {
+        v <- jvalue(ans)
+        if (is.na(v) || is.null(ans$probs)) NA_real_
+        else suppressWarnings(as.double(ans$probs[[v]]))
+      }
     },
     score  = jconf(ans),
     NA_real_)

@@ -777,6 +777,79 @@ if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
   do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
 
 # ===========================================================================
+cat("\n15. round-5 audit regressions (Astra R5-B1/B2/B3)\n")
+# R5-B1: display redaction must never MERGE option identities. The vendor
+# pattern scrubber turns "Bearer option_alpha"/"Bearer option_beta" into the
+# same [REDACTED] label; a label re-lookup after that could hand the selected
+# option a SIBLING's higher probability (fabricated certainty). selected_p is
+# bound at construction, before any redaction.
+fake_key <- "astra_R5_FAKE_opaque_7Qa9"
+old_env_key <- Sys.getenv("TYPESAFE_API_KEY", unset = NA)
+Sys.setenv(TYPESAFE_API_KEY = fake_key)
+expect("R5-B1 (no-key control): pattern-colliding option names keep the SELECTED p, not a sibling's",
+       { offered <- list("Bearer option_alpha" = "first", "Bearer option_beta" = "second")
+         tr <- function(body) list(answers = list(q = list(
+           choice = "Bearer option_beta",
+           probabilities = stats::setNames(list(0.9, 0.1), names(offered)))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
+         isTRUE(all.equal(jprob(a), 0.1)) &&
+           identical(as.character(jvalue(a)), "Bearer [REDACTED]") })
+expect("R5-B1: exact-key-colliding probability names cannot inflate the selected p",
+       { offered <- stats::setNames(list("first", "second"),
+                                    c(fake_key, "[REDACTED-API-KEY]"))
+         tr <- function(body) list(answers = list(q = list(
+           choice = "[REDACTED-API-KEY]",
+           probabilities = stats::setNames(list(0.9, 0.1), names(offered)))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
+         isTRUE(all.equal(jprob(a), 0.1)) })
+expect("R5-B2: a contract warning naming a key-bearing question never emits the key",
+       { msgs <- character(0)
+         got <- withCallingHandlers(
+           tryCatch({
+             options(Rjif.transport = function(body)
+                       list(answers = stats::setNames(
+                         list(list(type = "noul", noul = "0.9")), fake_key)))
+             jev_eval("s", stats::setNames(list(jev_noul_q("x")), fake_key))
+             "done"
+           }, error = function(e) conditionMessage(e)),
+           warning = function(w) { msgs <<- c(msgs, conditionMessage(w))
+                                  invokeRestart("muffleWarning") })
+         options(Rjif.transport = NULL)
+         length(msgs) >= 1L &&
+           !any(grepl(fake_key, msgs, fixed = TRUE)) &&
+           !grepl(fake_key, got, fixed = TRUE) })
+expect("R5-B2: a missing-answer error naming a key-bearing question never emits the key",
+       { msg <- withr_options(
+           Rjif.transport = function(body) list(answers = list()),
+           tryCatch(jev_eval("s", stats::setNames(list(jev_noul_q("x")), fake_key)),
+                    error = function(e) conditionMessage(e)))
+         is.character(msg) && !grepl(fake_key, msg, fixed = TRUE) })
+expect("R5-B3: a key-bearing model attribute never survives dput/serialize of the answer set",
+       { z <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(model = paste0("vendor/", fake_key),
+                  answers = list(q = list(type = "noul", noul = 0.9))),
+           jev_eval("s", list(q = jev_noul_q("x")))))
+         bytes <- serialize(z, NULL)
+         # serialized R streams contain NUL bytes: scan them with grepRaw, not
+         # rawToChar (which refuses embedded NULs)
+         !any(grepl(fake_key, capture.output(dput(z)), fixed = TRUE)) &&
+           length(grepRaw(fake_key, bytes, fixed = TRUE)) == 0L })
+expect("R5-B3: environments/functions in raw metadata are replaced, not traversed",
+       { env <- new.env(); assign("secret", fake_key, envir = env)
+         a <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(type = "noul", noul = 0.9,
+                                          diag = env))),
+           jev_eval("s", list(q = jev_noul_q("x")))$q))
+         grepl("REDACTED", paste(capture.output(dput(a$raw)), collapse = " ")) &&
+           !any(grepl(fake_key, capture.output(dput(a)), fixed = TRUE)) })
+if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
+  do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
+
+# ===========================================================================
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
