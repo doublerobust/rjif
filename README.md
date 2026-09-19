@@ -130,6 +130,33 @@ remotes::install_github("doublerobust/rjif")
 
 Imports `httr`, `jsonlite`, `stats`; no compiled code.
 
+## Getting a key and trying it
+
+Get an API key at https://console.typesafe.ai/keys, then put this line in
+your `~/.Renviron` file (restart R afterwards):
+
+```
+TYPESAFE_API_KEY=your-key-goes-here
+```
+
+That's the whole setup; the package reads the variable at call time and never
+writes it anywhere. Then:
+
+```r
+library(Rjif)
+jif("the patient was hospitalized for six days after the infusion",
+    "a serious adverse event is being reported")
+```
+
+No key yet? Every example in this README and the help pages also runs
+offline against a deterministic mock, so you can see the shapes first:
+
+```r
+options(Rjif.transport = rjif_mock_transport)
+jif("the patient was hospitalized for six days after the infusion",
+    "a serious adverse event is being reported")
+```
+
 ## Tests
 
 `Rscript tests/smoke.R` runs 184 offline assertions against the mock
