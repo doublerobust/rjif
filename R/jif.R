@@ -41,6 +41,10 @@ jif <- function(state, question, ..., threshold = 0.5,
   threshold <- .single_number(threshold, "threshold")
   confidence_floor <- .single_number(confidence_floor, "confidence_floor",
                                      allow_na = TRUE)
+  # Consistent NA-floor semantics across the package (audit m1): an NA floor
+  # means "refuse to decide" -> abstain always, same as jev_score_many().
+  if (is.na(confidence_floor)) confidence_floor <- Inf
+  .check_floor_range(confidence_floor)
   ans <- jev_eval(state, list(q = q), model = model)$q
   v <- jvalue(ans)
 
@@ -95,6 +99,19 @@ jif <- function(state, question, ..., threshold = 0.5,
   x
 }
 
+# A confidence floor outside [0, 1] is almost always a typo (0-100 scale?).
+# Warn but keep the user's stated behaviour: <=0 never gates, >1 always gates.
+.check_floor_range <- function(floor) {
+  if (is.finite(floor) && (floor < 0 || floor > 1)) {
+    warning("Rjif: confidence_floor ", formatC(floor, format = "f", digits = 3),
+            " is outside [0, 1] (did you mean a percentage?). ",
+            if (floor <= 0) "It will never trigger an abstention." else
+              "It will abstain on every row.",
+            call. = FALSE)
+  }
+  invisible(floor)
+}
+
 # Build a question from shorthand: a plain string means a Noul assertion.
 # A *named* character vector/list as the first extra argument means a choice
 # question (option = description). An unnamed character vector is rejected --
@@ -141,9 +158,11 @@ jif_reason <- function(x) {
 # columns together first.
 #
 # Returns a data.frame with one row per input, in the same order:
-#   decision   logical. TRUE/FALSE when the question was decided; FALSE when
-#              undecided -- which is why you must read 'abstained' too, and why
-#              'option'/'p' stay NA for undecided rows.
+#   decision   logical NA tri-state (audit B2): TRUE/FALSE only when the
+#              question was actually decided; NA when undecided. A bare `if()`
+#              on an NA decision errors, which is the point -- an undecided
+#              clinical row must never fall into the negative branch because a
+#              batch helper wrote FALSE for it. Read abstained/error too.
 #   option     character: the chosen option (choice), "true"/"false" (noul),
 #              or the rubric level index as text (score); NA when undecided.
 #   p          the probability behind the decision (jprob(): the noul score, the
@@ -152,11 +171,13 @@ jif_reason <- function(x) {
 #   confidence API confidence. ALWAYS NA for noul questions -- the API sends no
 #              confidence for noul, which is why confidence_floor is applied to
 #              'p' for that type.
-#   abstained  TRUE when the row could not be decided: no answer value, or p
-#              under confidence_floor, or p unavailable while a floor was set,
-#              or an NA state / transport failure for that row.
-#   error      per-row failure text ("" when the row succeeded), so one bad
-#              narrative does not discard the other 4,999.
+#   abstained  TRUE when the row could not be decided: no answer value, p under
+#              confidence_floor, p unavailable while a floor was set, an invalid
+#              API answer, or an NA state / transport failure for that row.
+#   error      per-row failure text ("" when the row succeeded), scrubbed of any
+#              control characters AND of the caller's API key before it is
+#              persisted, so one bad narrative does not discard the other 4,999
+#              and a printed data frame can never leak the credential.
 #
 # 'batch' is the number of rows processed per progress chunk. The API takes ONE
 # state per call, so this loop is one HTTP request per row either way; batch
@@ -171,6 +192,7 @@ jev_score_many <- function(state_vec, question, ...,
   confidence_floor <- .single_number(confidence_floor, "confidence_floor",
                                      allow_na = TRUE)
   if (is.na(confidence_floor)) confidence_floor <- Inf  # NA floor = abstain always
+  .check_floor_range(confidence_floor)
   if (!is.character(state_vec) && !is.factor(state_vec)) {
     stop("Rjif: state_vec must be a character (or factor) vector.", call. = FALSE)
   }
@@ -188,39 +210,60 @@ jev_score_many <- function(state_vec, question, ...,
     for (j in i:e) {
       st <- state_vec[[j]]
       if (is.na(st)) {
-        dec[j] <- FALSE; abst[j] <- TRUE; errs[j] <- "state is NA"
+        dec[j] <- NA; abst[j] <- TRUE; errs[j] <- "state is NA"
         next
       }
-      ans <- tryCatch(jev_eval(st, list(q = q), model = model)$q,
-                      error = function(err) paste0(conditionMessage(err)))
-      if (is.character(ans)) {
-        dec[j] <- FALSE; abst[j] <- TRUE; errs[j] <- substr(ans, 1L, 300L)
+      # jev_eval can warn (contract violation) as well as throw; capture both.
+      warns <- character(0)
+      ans <- withCallingHandlers(
+        tryCatch(jev_eval(st, list(q = q), model = model)$q,
+                 error = function(err) structure(list(msg = conditionMessage(err)),
+                                                 class = "jev_row_error")),
+        warning = function(w) {
+          warns <<- c(warns, conditionMessage(w))
+          invokeRestart("muffleWarning")
+        })
+      if (inherits(ans, "jev_row_error")) {
+        dec[j] <- NA; abst[j] <- TRUE
+        errs[j] <- .clean_error_text(ans$msg, 300L)
         next
       }
       v <- jvalue(ans)
       p <- jprob(ans)
       ps[j] <- p
       cf[j] <- jconf(ans)
-      if (q$type == "choice") {
-        dec[j] <- !is.na(v)
-        chosen[j] <- v
-      } else if (q$type == "noul") {
-        dec[j] <- if (is.na(v)) FALSE else (v >= threshold)
-        chosen[j] <- if (is.na(v)) NA_character_ else if (dec[[j]]) "true" else "false"
-      } else {
-        dec[j] <- if (is.na(v)) FALSE else (v >= threshold)
-        chosen[j] <- if (is.na(v)) NA_character_ else formatC(v, format = "f", digits = 3)
-      }
-      # undecided: no value at all, or under the floor (or the floor was set but
-      # there is no probability to compare it against)
+      # undecided: no value at all (missing answer or contract violation),
+      # under the floor, or the floor was set but no probability exists to
+      # compare it against. Undecided means decision = NA, never FALSE (B2).
       undecided <- is.na(v) ||
         (confidence_floor > 0 && (is.na(p) || p < confidence_floor))
       if (undecided) {
         abst[j] <- TRUE
-        dec[j] <- FALSE
+        dec[j] <- NA
         chosen[j] <- NA_character_
       } else {
         abst[j] <- FALSE
+        if (q$type == "choice") {
+          chosen[j] <- v
+          dec[j] <- TRUE   # a decided choice: 'option' carries the routing
+        } else if (q$type == "noul") {
+          dec[j] <- (v >= threshold)
+          chosen[j] <- if (dec[[j]]) "true" else "false"
+        } else {
+          dec[j] <- (v >= threshold)
+          chosen[j] <- formatC(v, format = "f", digits = 3)
+        }
+      }
+      # A contract-violating answer arrives here with value NA (above, it
+      # abstains) and an explanatory `contract` field; surface it in the error
+      # column. .clean_error_text redacts the real API key before persisting.
+      note <- ans[["contract"]]
+      if (!is.null(note) && !is.na(note) && nzchar(note)) {
+        errs[j] <- .clean_error_text(
+          paste(c(paste0("invalid API answer: ", note), warns), collapse = "; "),
+          300L)
+      } else if (length(warns)) {
+        errs[j] <- .clean_error_text(paste(warns, collapse = "; "), 300L)
       }
     }
     i <- e + 1L
