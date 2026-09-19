@@ -469,7 +469,9 @@ invisible(jif(ticket, Q_REFUND))
 u <- jev_usage()
 expect("calls counted", identical(u$calls, 1L))
 expect("input tokens accumulated from the usage block",
-       identical(u$input_tokens, nchar(ticket, type = "bytes") %/% 4L))
+       # counters accumulate in double space (audit R2-M3: no 32-bit overflow);
+       # compare values, not storage type
+       identical(as.integer(u$input_tokens), nchar(ticket, type = "bytes") %/% 4L))
 expect("cost estimate uses the documented rate",
        isTRUE(all.equal(u$est_cost_usd, u$input_tokens / 1e6 * price_per_mtok)))
 withr_options(Rjif.transport = function(body)
@@ -478,7 +480,7 @@ withr_options(Rjif.transport = function(body)
     jev_usage_reset()
     jev_eval("s", list(q = jev_noul_q("x")))
 })
-expect("a usage block is summed", identical(jev_usage()$input_tokens, 100L))
+expect("a usage block is summed", identical(as.integer(jev_usage()$input_tokens), 100L))
 withr_options(Rjif.transport = transport_with_answers(list(q = list(type = "noul",
                                                                    noul = 0.5))), {
   jev_usage_reset(); jev_eval("s", list(q = jev_noul_q("x")))
@@ -569,6 +571,77 @@ if (loaded) {
 } else {
   cat("  (skipped: exercising the sourced files, not an installed namespace)\n")
 }
+
+# ===========================================================================
+cat("\n12. round-2 audit regressions (Astra R2-B1/B2/M1/M2/M3/m1/m3)\n")
+fake_key <- "astra_R2_FAKE_opaque_7Qa9"
+old_env_key <- Sys.getenv("TYPESAFE_API_KEY", unset = NA)
+Sys.setenv(TYPESAFE_API_KEY = fake_key)
+expect("boolean score confidence is rejected, not coerced to p=1 (R2-B1)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = transport_with_answers(
+             list(q = list(score = 2, confidence = TRUE))),
+           jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe"))))$q))
+         is.na(jprob(a)) && is.na(jvalue(a)) })
+expect("boolean choice probabilities are rejected (R2-B1)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = transport_with_answers(
+             list(q = list(choice = "safety",
+                           probabilities = list(safety = TRUE, routine = FALSE),
+                           confidence = 0.9))),
+           jev_eval("s", list(q = jev_choice_q("i", list(safety = "a", routine = "b"))))$q))
+         is.na(jprob(a)) })
+expect("positional unnamed probability ARRAY survives redaction shape-wise (R2-M1)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = transport_with_answers(
+             list(q = list(choice = "safety", probabilities = list(0.8, 0.2),
+                           confidence = 0.8))),
+           jev_eval("s", list(q = jev_choice_q("i", list(safety = "a", routine = "b"))))$q))
+         identical(jvalue(a), "safety") && isTRUE(all.equal(jprob(a), 0.8)) })
+expect("a contract-invalid answer leaves NO usable p or confidence (R2-M2)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = transport_with_answers(
+             list(q = list(score = 99, confidence = 0.99))),
+           jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe"))))$q))
+         is.na(jprob(a)) && is.na(jconf(a)) && !is.na(a$contract) })
+expect("malformed usage cannot discard a delivered answer (R2-M3)",
+       { a <- withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(type = "noul", noul = 0.9)),
+                  usage = list(input_tokens = list())),
+           suppressWarnings(jev_eval("s", list(q = jev_noul_q("x")))$q))
+         identical(jvalue(a), 0.9) })
+expect("cumulative token counters cannot 32-bit overflow to NA (R2-M3)",
+       { jev_usage_reset()
+         big <- function(body) list(answers = list(q = list(type = "noul", noul = 0.9)),
+                                    usage = list(input_tokens = 1.5e9))
+         withr_options(Rjif.transport = big, {
+           jev_eval("s", list(q = jev_noul_q("x"))); jev_eval("s", list(q = jev_noul_q("y"))) })
+         u <- jev_usage()
+         identical(u$input_tokens, 3e9) && is.finite(u$est_cost_usd) })
+expect("transport exceptions carrying the key are scrubbed before rethrow (R2-B2)",
+       { msg <- withr_options(
+           Rjif.transport = function(body)
+             stop("connect failed for Bearer ", fake_key, call. = FALSE),
+           tryCatch(jev_eval("s", list(q = jev_noul_q("x"))),
+                    error = function(e) conditionMessage(e)))
+         !grepl(fake_key, msg, fixed = TRUE) &&
+           grepl("[REDACTED-API-KEY]", msg, fixed = TRUE) })
+expect("an atomic invalid answer yields the NA+contract object, not a crash (R2-m1)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = transport_with_answers(list(q = 0.99)),
+           jev_eval("s", list(q = jev_noul_q("x")))$q))
+         is.na(jvalue(a)) && !is.na(a$contract) })
+expect("jmatch NA floor abstains to fallback; consistent with jif (R2-m3)",
+       { got <- withr_options(
+           Rjif.transport = transport_with_answers(
+             list(q = list(choice = "safety", probabilities = list(safety = 0.9,
+                                                                   routine = 0.1),
+                           confidence = 0.9))),
+           jmatch("s", list(safety = "a", routine = "b"), confidence_floor = NA))
+         is.na(got) })
+if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
+  do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
 
 # ===========================================================================
 cat("\n")

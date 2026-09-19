@@ -155,6 +155,12 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
       if (length(rest)) {
         s <- sum(probs[rest])
         probs[rest] <- if (s > 0) probs[rest] * (1 - scripted) / s else (1 - scripted) / length(rest)
+      } else {
+        # single offered option: the contract is a distribution over the
+        # offered options, so it must sum to 1 (audit m2 round 1/2: a scripted
+        # .3 on a one-option choice emitted probabilities summing to .3, which
+        # our own validator rightly rejects). One option -> probability 1.
+        probs[[top]] <- 1
       }
     }
     pick <- crit[[which.max(probs)[[1L]]]]

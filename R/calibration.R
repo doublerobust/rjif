@@ -198,9 +198,13 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
     out <- rep(NA, length(m))
     out[m %in% c("true", "yes", "y", "1")] <- TRUE
     out[m %in% c("false", "no", "n", "0")] <- FALSE
-    if (all(is.na(out)) && any(!is.na(x))) {
-      warning("Rjif: could not interpret truth column as logical; ",
-              "returning NA for every row.", call. = FALSE)
+    bad <- !is.na(x) & is.na(out)
+    if (any(bad)) {
+      # per-value disclosure (audit R2-m2), symmetric with the numeric path:
+      # an uninterpretable entry is dropped AND counted, never silently NA.
+      warning("Rjif: truth column has ", sum(bad),
+              " uninterpretable value(s) (not true/false/yes/no/0/1); ",
+              "treated as NA.", call. = FALSE)
     }
     return(out)
   }

@@ -314,6 +314,12 @@ jmatch <- function(state, branches, ..., instructions = NULL,
                    abstain_options = c("none", "other", "unspecified", "human",
                                        "ambiguous", "unsure"),
                    model = getOption("Rjif.model", "jev-latest")) {
+  # Same floor policy as jif()/jev_score_many() (audit R2-m3): NA floor =
+  # abstain always -> fallback; out-of-[0,1] finite floor warns.
+  confidence_floor <- .single_number(confidence_floor, "confidence_floor",
+                                     allow_na = TRUE)
+  if (is.na(confidence_floor)) return(fallback)
+  .check_floor_range(confidence_floor)
   q <- jev_choice_q(instructions %||%
     "Which single description best matches the state?", branches)
   ans <- jev_eval(state, list(q = q), model = model)$q
