@@ -479,19 +479,45 @@ jev_choice_q <- function(instructions, criteria) {
                  criteria = as.list(criteria)), class = "jev_question")
 }
 
-# score: rate the state on an ordered rubric (vector of level descriptions,
-# lowest severity first). Levels are labelled 0..k-1 in the response legend.
+# score: rate the state on an ordered rubric (character vector of level
+# descriptions, lowest severity first; or a list of structured level objects
+# such as list(what = "...", examples = list("...")) - the API accepts JSON
+# structure per the official docs). Levels are labelled 0..k-1 in the response
+# legend, and the answer's `score` is a CONTINUOUS probability-weighted position
+# that may land between levels.
+# NOTE (audit R11): unlike the old behaviour, structured criteria objects are
+# preserved and serialized as JSON (the live contract accepts them); plain
+# string levels behave exactly as before.
 jev_score_q <- function(instructions, criteria) {
-  crit <- as.character(criteria)
+  if (is.list(criteria)) {
+    # structured levels: keep JSON-native structure
+    crit <- criteria
+  } else {
+    crit <- as.character(criteria)
+  }
   if (!length(crit)) {
     stop("Rjif: score criteria must be a non-empty character vector of ordered ",
          "level descriptions.", call. = FALSE)
   }
-  if (any(!nzchar(crit)) || any(is.na(crit))) {
+  if (is.character(crit) && (any(!nzchar(crit)) || any(is.na(crit)))) {
     stop("Rjif: score criteria may not contain empty or NA level descriptions.",
          call. = FALSE)
   }
-  if (!is.null(names(criteria))) crit <- paste0(names(criteria), ": ", crit)
+  if (!is.null(names(criteria))) {
+    crit <- if (is.list(crit)) {
+      # label each level with its name, then drop names so criteria serializes
+      # as an ordered JSON ARRAY (the live contract's shape), not an object
+      out <- lapply(seq_along(crit), function(i)
+        if (is.character(crit[[i]])) paste0(names(criteria)[[i]], ": ", crit[[i]])
+        else structure(c(list(level = names(criteria)[[i]]), crit[[i]]),
+                       names = c("level", names(crit[[i]]))))
+      unname(out)
+    } else {
+      paste0(names(criteria), ": ", crit)
+    }
+  } else if (is.list(crit)) {
+    crit <- unname(crit)   # ordered JSON array, not an object
+  }
   structure(list(type = "score", instructions = instructions, criteria = crit),
             class = "jev_question")
 }
@@ -676,7 +702,9 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
 
 # Accessors --------------------------------------------------------------------
 
-# The answer's value: noul/score -> numeric 0-1 / level index; choice -> option name.
+# The answer's value: noul -> probability in 0-1; score -> CONTINUOUS
+# probability-weighted level position in 0..k-1 (can land between levels, live
+# contract 2026-09-19); choice -> option name.
 jvalue <- function(ans) ans$value
 
 # Reported confidence: the API's separate confidence scalar, present only on
@@ -687,9 +715,12 @@ jvalue <- function(ans) ans$value
 # jev_score_many() apply confidence_floor to jprob() for exactly this reason.
 jconf <- function(ans) `%||%`(ans$confidence, NA_real_)
 
-# Probability that the picked answer is right: for noul the noul score, for
-# choice the probability of the chosen option, for score the API confidence (a
-# score answer has no per-level distribution, only a legend).
+# Probability that backs the decision: for noul the noul score, for choice the
+# probability of the chosen option, for score the API confidence. For score the
+# answer now also carries a per-level distribution (continuous contract);
+# confidence is the vendor's DISTRIBUTION-CONCENTRATION summary -- high
+# confidence means the mass is concentrated, NOT a guarantee the position is
+# right (see docs /confidence). Never read it as P(answer correct).
 jprob <- function(ans) {
   if (is.null(ans$type)) return(NA_real_)
   out <- switch(ans$type,
@@ -764,9 +795,22 @@ print.jev_answers <- function(x, ...) {
     cf <- a$confidence
     if (length(cf) == 1L && !is.na(cf)) cat("  conf=", sprintf("%.3f", cf), sep = "")
     if (!is.null(a$legend)) {
-      lg <- if (is.list(a$legend)) vapply(a$legend, function(z) as.character(z[[1L]]),
-                                          character(1))
-            else as.character(a$legend)
+      # legend entries may be plain descriptions OR structured level objects
+      # ({what, examples} in any key order -- audit R11: z[[1L]] crashed when
+      # examples preceded what). Coerce to a single display label per level.
+      lg <- if (is.list(a$legend)) {
+        vapply(a$legend, function(z) {
+          if (is.list(z)) {
+            if (!is.null(z[["what"]])) as.character(z[["what"]][[1L]])
+            else paste0(names(z), collapse = "/")
+          } else if (length(z) == 1L) {
+            as.character(z)
+          } else {
+            paste0("[", paste(utils::head(as.character(z), 2L), collapse = "|"),
+                   "]")
+          }
+        }, character(1))
+      } else as.character(a$legend)
       cat("\n     legend: ", paste0(names(lg), "=", lg, collapse = "; "), sep = "")
     }
     cat("\n")

@@ -43,7 +43,7 @@ no value at all — missingness is not low confidence).
 | --- | --- | --- |
 | `jev_noul_q()` | "is this assertion true of the state?" | score in 0-1 |
 | `jev_choice_q()` | "which of these described options?" | option + full distribution |
-| `jev_score_q()` | "rate the state on this ordered rubric" | level index + legend |
+| `jev_score_q()` | "rate the state on this ordered rubric" | continuous level position (0..k-1, may land between levels) + per-level probabilities + legend |
 
 All three can be mixed in one API call and are evaluated independently, so
 adding questions does not degrade the others.
@@ -101,7 +101,7 @@ Imports `httr`, `jsonlite`, `stats`; no compiled code.
 
 ## Tests
 
-`Rscript tests/smoke.R` — 138 offline assertions against the mock transport and
+`Rscript tests/smoke.R` — 184 offline assertions against the mock transport and
 a set of scripted fake responses, covering the abstention lane, the API
 response contract, malformed-usage handling, and the calibration analytics.
 

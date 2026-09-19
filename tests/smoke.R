@@ -536,6 +536,37 @@ expect("R11-B1: a score distribution supplied as a NAMED NUMERIC VECTOR (not jus
          ok3 <- isTRUE(ds$decision[[1L]]) && !isTRUE(ds$abstained[[1L]]) &&
                 identical(ds$error[[1L]], "")
          ok1 && ok2 && ok3 })
+expect("structured legend entries print safely in ANY key order (R11: examples-first object crashed the printer)",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "score", score = 1.05, confidence = 0.9,
+           legend = list("0" = list(examples = list("a", "b"), what = "low"),
+                         "1" = list(what = "middle", examples = list("c")),
+                         "2" = "high"),
+           probabilities = list("0" = 0, "1" = 0.95, "2" = 0.05))))
+         out <- withr_options(Rjif.transport = tr, {
+           a <- jev_eval("s", list(q = jev_score_q("i",
+                    c("low", "middle", "high"))))
+           capture.output(print(a))
+         })
+         txt <- paste(out, collapse = "\n")
+         grepl("low", txt, fixed = TRUE) && grepl("middle", txt, fixed = TRUE) })
+expect("structured score criteria survive the constructor and serialize as an ordered JSON array (R11)",
+       { crit <- list(list(what = "low", examples = list("a", "b")),
+                      list(what = "high", examples = list("c")))
+         q <- jev_score_q("rate it", crit)
+         json <- jsonlite::toJSON(unclass(q), auto_unbox = TRUE, null = "null")
+         identical(length(q$criteria), 2L) &&
+           grepl("\"criteria\":[{", json, fixed = TRUE) &&  # ordered JSON array of objects
+           grepl("low", json, fixed = TRUE) })
+expect("mock scripted score confidence = max emitted mass (point mass reads ~1, R11)",
+       { conf_at <- function(s) {
+           ans <- withr_options(
+             Rjif.transport = rjif_mock_transport(setNames(s, "i")),
+             jev_eval("s", list(q = jev_score_q("i",
+               c("none", "mild", "severe")))))$q
+           ans$confidence
+         }
+         conf_at(1.0) > 0.99 && conf_at(0.9999) > 0.99 })
 expect("the real transport demands an API key",
        grepl("TYPESAFE_API_KEY", err_msg(withr_options(Rjif.transport = NULL,
          transport_httr(list(state = "s")))), fixed = TRUE))

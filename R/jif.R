@@ -78,11 +78,16 @@ jif <- function(state, question, ..., threshold = 0.5,
     noul   = v >= threshold,
     # choice: the selected option name (a string, not TRUE/FALSE)
     choice = v,
-    # score: ordinal rubric level index (0 = lowest level). NOTE: for score
-    # questions `threshold` is a LEVEL, not a probability -- with 5 levels,
-    # threshold = 2 means "moderate or worse".
+    # score: CONTINUOUS probability-weighted level position (0 = lowest level;
+    # live contract: can land between levels). NOTE: for score questions
+    # `threshold` is a LEVEL, not a probability -- with 5 levels, threshold = 2
+    # means "the weighted position clears moderate or worse", not a hard class.
     score  = v >= threshold,
-    stop("Rjif: unknown question type '", q$type, "'.", call. = FALSE))
+    # only reachable with a hand-forged question object, but scrub anyway
+    # (R9-B1 precedent): a key in q$type must not leave via this message.
+    stop(.clean_error_text(paste0("Rjif: unknown question type '",
+                                  as.character(q$type)[[1L]], "'.")),
+         call. = FALSE))
 
   structure(out, abstained = FALSE, answer = ans, abstain_reason = NA_character_)
 }
@@ -165,7 +170,8 @@ jif_reason <- function(x) {
 #              clinical row must never fall into the negative branch because a
 #              batch helper wrote FALSE for it. Read abstained/error too.
 #   option     character: the chosen option (choice), "true"/"false" (noul),
-#              or the rubric level index as text (score); NA when undecided.
+#              or the CONTINUOUS rubric position to 3 decimals as text (score,
+#              e.g. "1.050" -- it can land between levels); NA when undecided.
 #   p          the probability behind the decision (jprob(): the noul score, the
 #              chosen option's probability, or the score confidence); NA when the
 #              API sent nothing.

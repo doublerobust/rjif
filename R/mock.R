@@ -35,8 +35,10 @@
 #   * noul answers carry NO confidence field -- the real API does not send one;
 #   * choice answers carry probabilities (summing to 1) + a confidence equal to
 #     the selected option's probability;
-#   * score answers carry a legend mapping level index ("0".. "k-1") to level
-#     description, plus a confidence;
+#   * score answers carry a CONTINUOUS probability-weighted level position
+#     (0..k-1, can land between levels; live contract 2026-09-19), a legend
+#     mapping level index ("0".."k-1") to description, per-level
+#     probabilities summing to 1, and a confidence;
 #   * a usage block with input_tokens is returned so cost accounting is wired.
 #
 # To test the API's failure shapes (missing 'answers', null values, wrong
@@ -170,7 +172,10 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
                 confidence = round(probs[[pick]], 4)))
   }
   if (q$type == "score") {
-    lv <- as.character(q$criteria)
+    lv <- vapply(q$criteria, function(z)
+      if (is.list(z)) as.character(z[["what"]] %||% z[["level"]] %||%
+                                   paste0(names(z), collapse = "/"))
+      else as.character(z), character(1))
     if (!length(lv)) {
       return(list(type = "score", score = NA_real_, legend = list(),
                   confidence = NA_real_))
@@ -204,7 +209,12 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
       acc[[lo + 1L]] <- acc[[lo + 1L]] + (1 - f)
       acc[[hi + 1L]] <- acc[[hi + 1L]] + f
       sprob <- setNames(lapply(acc, function(x) round(x, 4)), names(acc))
-      conf <- round(1 - f, 4)
+      # confidence from the EMITTED distribution (max mass), not the pre-round
+      # lower-adjacent share: a point mass must read ~1 even when sc lands on
+      # an exact integer (audit R11: round(1-f) reset to 1.0 at integers and
+      # ~0 just below them). This is a mock approximation of concentration,
+      # NOT a claim to reproduce the vendor's confidence formula.
+      conf <- max(as.numeric(sprob))
       sc <- round(sum(as.numeric(sprob) * w), 4)
     }
     return(list(type = "score", score = as.double(sc),
