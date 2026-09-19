@@ -18,65 +18,87 @@ selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
 
   \item{p}{name of the probability column (values in [0, 1]).}
 
-  \item{truth}{name of the outcome column: 0/1 numerics, logicals, a factor
-    whose labels are 0/1, or numeric-looking strings (all read from labels,
-    never from R's internal integer codes). Anything else is refused
-    per-value with a warning and treated as missing; \code{truth} must be
-    GOLD labels. Against another model's labels you are measuring agreement,
-    not calibration.}
+  \item{truth}{name of the outcome column. Accepted values: numeric 0/1,
+    logicals, a factor with labels \code{\{"0"\}}/\code{\{"1"\}}, or
+    character labels that mean yes/no after lowercasing and trimming:
+    \code{true}, \code{yes}, \code{y}, \code{1} for events and \code{false},
+    \code{no}, \code{n}, \code{0} for non-events. Numeric-looking strings
+    like \code{"0.0"} are NOT parsed as numbers; they are counted as
+    uninterpretable. Anything else warns per value and is treated as missing.
+    Factor probability columns are read from their labels, never from R's
+    internal integer codes. \code{truth} must be GOLD labels: against another
+    model's labels you are measuring agreement, not calibration.}
 
-  \item{n_bins}{number of equal-width bins. Default 10; below about 100
-    scored rows the curve mostly measures bin noise.}
+  \item{n_bins}{number of equal-width bins. Default 10. Bins are half-open
+    intervals (a, b] except the lowest, which includes 0. Below about 100
+    scored rows the curve mostly measures bin noise (a rule of thumb, not an
+    implemented threshold).}
 
-  \item{floor_seq}{numeric vector of decision thresholds (no NA allowed),
-    each in [0, 1] or the rows there abstain. Values outside [0, 1] warn.}
+  \item{floor_seq}{numeric vector of decision thresholds, no NA allowed.
+    Values outside [0, 1] warn and then apply literally: a floor at or below
+    0 keeps every usable row, a floor above 1 keeps none.}
 }
 \value{
-  \code{reliability_curve()} returns a data frame with one row per bin (empty
-  bins included, so the shape is stable): bin cut labels, mean predicted
-  probability, observed event frequency, bin size, and total row weight.
-  Attributes: \code{n_used} (rows contributing), \code{n_rows} (all rows),
-  and \code{dropped}, a mutually-exclusive accounting of every excluded row
-  (missing probability, missing truth, out-of-range probability, out-of-range
-  truth) that adds up to \code{n_rows - n_used}.
+  \code{reliability_curve()} returns a data frame with one row per bin
+  (empty bins included, so the shape is stable): \code{bin} (the cut label),
+  \code{n} (rows in bin), \code{mean_p} (mean predicted probability),
+  \code{accuracy} (the observed event frequency in the bin: this is the
+  outcome rate, not classification accuracy). Attributes: \code{n_used},
+  \code{n_bins}, \code{n_out_of_range} (rows dropped for a probability
+  outside [0, 1]), and \code{n_dropped}, a list with mutually exclusive
+  buckets:
+  \code{p_na} (missing probability), \code{truth_na} (missing or
+  uninterpretable truth), \code{out_of_range} (probability outside [0, 1]),
+  \code{not_scored}. A dropped row is counted in exactly one bucket
+  (priority p-NA, then truth-NA, then out-of-range), and
+  \code{n_used + sum(unlist(n_dropped)) == nrow(df)} always holds.
 
-  \code{ece()} returns a single numeric: the sample-size-weighted mean absolute
-  gap between predicted probability and observed frequency across non-empty
-  bins, or \code{NA} when nothing is scored. It warns below 30 usable rows
-  and states the sample it used.
+  \code{ece()} returns a single numeric: the sample-size-weighted mean
+  absolute gap between \code{mean_p} and observed event frequency over
+  non-empty bins, or \code{NA} when nothing is scored. It warns below 30
+  usable rows and states the sample it used.
 
   \code{selection_curve()} returns a data frame with one row per floor:
-  \code{floor}, \code{coverage} (share of rows kept by \code{p >= floor}),
-  \code{n_kept}, and \code{pos_rate}, the event prevalence among kept rows.
-  This is a coverage/PPV view; accuracy would additionally need the true
-  negatives. Attributes \code{n_usable} and \code{n_rows} bound it; a warning
-  fires when no row is usable.
+  \code{floor}, \code{n} (usable rows, the denominator for everything),
+  \code{kept}, \code{coverage} (kept / usable), \code{pos_rate} (event
+  prevalence among kept rows), \code{escalated} (1 - coverage). Coverage is
+  a share of USABLE rows, not of all input rows; \code{attr(, "n_rows")}
+  reports the full input size and \code{attr(, "n_usable")} the denominator.
+  \code{pos_rate} is not correctness: classifying \code{p = (0.2, 0.8)}
+  against \code{truth = (0, 1)} at floor 0 gives prevalence 0.5 even though
+  both threshold-0.5 decisions are correct. A warning fires when no row is
+  usable.
 }
 \description{
 Three descriptive tools for auditing the probabilities Jev returns on your
 own traffic and your own gold labels. None of them calibrates anything or
 tests a hypothesis: no standard errors, no bands, no p-values. A 10-bin
-curve from 50 rows is a sketch; quote the \code{n_used} attribute next to every
-number you report.
+curve from 50 rows is a sketch; quote the \code{n_used} attribute next to
+every number you report.
 }
 \details{
-\code{ece()} is the classic equal-width-binning estimator of expected
+\code{ece()} is the classic equal-width-binning plug-in estimator of expected
 calibration error (Naeini et al.; popularised by Guo et al. 2017). Two
 properties to remember when quoting it:
 
 \itemize{
-  \item It is a point estimate, not an upper bound. There are populations
-    (for example, equal-mass bins at p = 0.01 and p = 0.09 with deterministic
-    truths) where the binned estimate sits well below the true error, and the
-    other direction happens too.
-  \item It is not the bias-corrected estimator of Nixon et al. 2022. Numbers
-    from the two are not comparable.
+  \item It is a point estimate, not an upper bound. With two equal-mass
+    probability atoms, 0.01 and 0.09, and deterministic truths 1 and 0, both
+    atoms fall in the first bin and the estimate reads 0.45 while the true
+    calibration error is 0.54. The other direction also happens from
+    sampling: 30 observed events at p = 0.5 estimate ECE 0.5 against a truly
+    calibrated source. These examples show direction, not a precision
+    guarantee.
+  \item It is a different estimator from the debiased versions in the
+    literature (Nixon et al. 2019, arXiv:1904.01685; Roelofs et al., AISTATS
+    2022), which target and correct different biases. Know which one a
+    comparison is quoting.
 }
 
-The drop filters are deliberately strict because a probability outside [0, 1]
-or a truth code outside \code{\{0, 1, NA\}} signals a broken pipeline, not noise; the
-dropped rows are counted, not silently discarded, and each exclusion bucket
-names its own mechanism.
+The drop filters are deliberately strict because a probability outside
+[0, 1] or a truth code outside the accepted labels signals a broken
+pipeline, not noise; the dropped rows are counted in the \code{n_dropped}
+buckets rather than silently discarded.
 }
 \examples{
 library(Rjif)
@@ -86,13 +108,15 @@ df$p[df$p < 0.4] <- df$p[df$p < 0.4] * 0.4   # some overprediction at the top
 
 rc <- reliability_curve(df)
 attr(rc, "n_used")
-rc$dropped                    # where every excluded row went
+attr(rc, "n_dropped")           # where every excluded row went, by mechanism
 
 ece(df)
-selection_curve(df)           # coverage and prevalence as the floor rises
+selection_curve(df)             # coverage and prevalence as the floor rises
 
 # rows dropped for bad data are accounted for, not hidden
-df2 <- rbind(df, data.frame(p = 1.5, truth = 2), data.frame(p = NA, truth = 1))
-length(attr(reliability_curve(df2), "dropped"))
+df2 <- rbind(df[1:50, ], data.frame(p = 1.5, truth = 2),
+                      data.frame(p = NA, truth = 1))
+rc2 <- suppressWarnings(reliability_curve(df2))
+unlist(attr(rc2, "n_dropped")) + attr(rc2, "n_out_of_range")
 }
 \seealso{\code{\link{jev_score_many}}}

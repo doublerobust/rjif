@@ -33,8 +33,10 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     row (useful in tests). Applied to \code{\link{jprob}}, like
     \code{jif()}.}
 
-  \item{batch}{number of rows per progress report. This controls reporting
-    only; it does not batch the API or amortise cost.}
+  \item{batch}{chunk size for the internal loop. It changes nothing the
+    caller observes (no progress output is emitted) and does not batch the
+    API: each non-NA state is still one HTTP request, and NA states are
+    skipped without a call.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
     \code{"jev-latest"}.}
@@ -48,22 +50,26 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
   \item{instructions}{the routing question; defaults to "Which single
     description best matches the state?".}
 
-  \item{fallback}{value returned when routing fails or abstains (default
-    \code{NA_character_}).}
+  \item{fallback}{value returned when the model abstains or picks an
+    abstention option (see \code{abstain_options}), or the floor gates it
+    out. Transport and API errors are NOT caught into \code{fallback};
+    they propagate.}
 
   \item{abstain_options}{option names that mean "no route" even when the
     model picks them confidently (case-insensitive).}
 }
 \value{
   \code{jev_score_many()} returns a data frame with one row per input state,
-  in order, with columns: \code{decision} (logical tri-state: TRUE/FALSE/NA,
-  or the chosen option for Choice questions), \code{option} (the option name,
-  "true"/"false" for Noul, or the continuous rubric position as text, e.g.
-  \code{"1.050"}, for Score), \code{p} (the \code{\link{jprob}} behind the
-  decision), \code{confidence} (the API confidence; \code{NA} for Noul),
+  in order, with columns: \code{decision} (logical tri-state for every
+  question type: TRUE/FALSE for decided Noul and Score rows, TRUE for any
+  decided Choice row, NA when undecided; the chosen option name is in
+  \code{option}, not in \code{decision}), \code{option} (the option name for
+  Choice, "true"/"false" for Noul, or the continuous rubric position as text,
+  e.g. \code{"1.050"}, for Score), \code{p} (the \code{\link{jprob}} behind
+  the decision), \code{confidence} (the API confidence; \code{NA} for Noul),
   \code{abstained}, and \code{error} (per-row contract/API text, redacted of
-  any API key; empty string when clean). Attributes \code{n_abstained},
-  \code{n_rows}, and \code{question_type} summarise the run.
+  any API key; empty string when clean). Attributes \code{n_abstained} and
+  \code{question_type} summarise the run; the row count is \code{nrow(df)}.
 
   \code{jmatch()} returns the chosen branch name, or \code{fallback}.
 }

@@ -54,11 +54,13 @@ jconf(ans)
 \value{
   \code{jev_eval()} returns a \code{jev_answers} list with one answer per
   question, in the order given; printing shows the value, the probability
-  vector where present, the confidence, and the legend. Each answer is
-  accompanied by \code{jev_usage()} counters for the call. A
-  contract-violating answer returns with value, probabilities, and confidence
-  all \code{NA} and an explanatory \code{contract} field, so a malformed
-  response can never populate downstream analytics.
+  vector where present, the confidence, and the legend. Session token and
+  call counters accumulate in \code{\link{jev_usage}}. A contract-violating
+  answer returns with value \code{NA}, \code{probs} \code{NULL}, confidence
+  \code{NA}, and an explanatory \code{contract} field, so a malformed
+  response can never populate downstream analytics. (A response missing a
+  question's answer object outright is an error, not a NA answer; a response
+  whose question types disagree with the request abstains its rows.)
 
   \code{jev_*_q()} return \code{jev_question} specs.
 

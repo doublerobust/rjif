@@ -18,9 +18,11 @@ probability-weighted position on an ordered rubric (it can land between
 levels) plus the per-level distribution.
 
 Set the API key in the environment variable \code{TYPESAFE_API_KEY}. The key
-is never printed, logged, or embedded in error messages; anything the API or a
-caller echoes back that contains the key is redacted before it leaves the
-package. For offline work, \code{\link{rjif_mock_transport}} replaces the HTTP
+is never printed, logged, or embedded in error messages: API responses,
+abstention reasons, and package diagnostics are scrubbed of the key before
+they are returned or signaled. (Request objects you build yourself are yours;
+the package scrubs what comes back out.) For offline work,
+\code{\link{rjif_mock_transport}} replaces the HTTP
 layer with deterministic (statistically meaningless) test values.
 }
 \details{

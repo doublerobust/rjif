@@ -64,7 +64,14 @@ jif_reason(x)
   (the full \code{jev_answer} object, readable with \code{\link{jvalue}},
   \code{\link{jprob}}, \code{\link{jconf}}), and \code{abstain_reason}.
 
-  \code{j_ifelse()} returns one of \code{yes}, \code{no}, \code{unknown}.
+  \code{j_ifelse()} returns \code{unknown} if \code{test} abstained or is a
+  bare \code{NA}; otherwise, when \code{test} is a string (a decided Choice
+  result) and \code{yes} or \code{no} is a named vector, the element whose
+  name matches the chosen option, or \code{unknown} if no branch name matches
+  (a routing decision never falls through to the wrong arm); an unmatched
+  string with plain scalars for \code{yes}/\code{no} returns \code{yes}. For
+  TRUE/FALSE tests it returns \code{yes} or \code{no}. Only the selected arm
+  is evaluated.
 
   \code{jif_abstained()} returns a single logical; TRUE also covers a bare
   \code{NA}. \code{jif_reason()} returns the abstention reason string, or

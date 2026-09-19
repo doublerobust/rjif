@@ -45,13 +45,19 @@ want undecided rows sliding into the else branch. Use `j_ifelse()` and give the
 
 `jif_reason()` says which case you're in:
 
-- `"confidence unavailable with a floor set"`: the API returned nothing for
-  this question. A missing answer, not a low one.
+- `"no answer value from the API"`: Jev returned nothing usable (the answer
+  was missing, or the validator rejected it). A missing datum, not evidence
+  of "false".
 - `"probability 0.612 < confidence_floor 0.700"`: there is an answer, and you
   decided it's not strong enough to act on.
+- `"confidence unavailable with a floor set"`: a decision exists but no
+  probability backs it, and you required one. The validator rejects answer
+  shapes without a usable probability, so in ordinary traffic you'll rarely
+  see this; it's a guard, not a common path.
 
-These call for different fixes (send better state, vs move the floor), so
-don't pool them.
+The first two call for different fixes (send better state, vs move the
+floor). A response that omits a question's answer object entirely is an
+error, not an abstention; the batch helper catches that per row.
 
 ## Confidence is spread, not accuracy
 
@@ -90,10 +96,11 @@ selection_curve(df)     # as you raise the floor: what share of rows do you
 
 Know what they are. `ece()` is a point estimate using the classic equal-width
 bins (Naeini et al.; Guo et al. 2017). It is not an upper bound on the true
-error, and it is not the bias-corrected version (Nixon et al. 2022). It warns
-under 30 usable rows; under about 100 it's mostly bin noise. Quote
-`attr(rc, "n_used")` along with the number. Row accounting is exact: every
-dropped row lands in exactly one bucket, and the buckets add up to `nrow(df)`.
+error, and it is not the bias-corrected version (Nixon et al. 2019, arXiv
+1904.01685). It warns under 30 usable rows; under about 100 it's mostly bin
+noise. Quote `attr(rc, "n_used")` along with the number. Row accounting is
+exact: every dropped row lands in exactly one `n_dropped` bucket, and
+`n_used + sum(dropped) == nrow(df)`.
 The `pos_rate` in `selection_curve()` is the event prevalence among kept rows,
 a coverage/PPV view rather than accuracy (that would need true negatives too).
 Reliability curves only mean something against gold truth; score Jev against
@@ -112,7 +119,7 @@ the vendor's probabilities behave on your traffic is an empirical question,
 and this README can't answer it.
 
 Cost and latency grow with rows: `jev_score_many()` is one call per row, and
-the `batch` argument only controls progress reporting.
+the `batch` argument is an internal chunk size, not request batching.
 
 `rjif_mock_transport()` is for testing with no key and no network. Its
 numbers are deterministic hashes, statistically meaningless, and the source

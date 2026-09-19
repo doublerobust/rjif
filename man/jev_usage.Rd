@@ -17,8 +17,10 @@ withr_options(expr, ...)
     rjif_mock_transport}.}
 }
 \value{
-  \code{jev_usage()} returns a list with \code{calls} (API calls since the
-  last reset), \code{input_tokens}, and \code{est_cost_usd}. Token counts
+  \code{jev_usage()} returns a list with \code{calls} (decoded responses
+  counted since the last reset; a transport that throws, or a response
+  rejected before accounting, counts zero calls, so this is not a complete
+  attempt or billing ledger), \code{input_tokens}, and \code{est_cost_usd}. Token counts
   come from the API's usage block when present; the cost estimate multiplies
   input tokens by a hard-coded rate and ignores output tokens (free in the
   pricing at time of writing), so treat it as an order-of-magnitude figure
