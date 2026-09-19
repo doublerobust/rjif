@@ -1,0 +1,17 @@
+Package: Rjif
+Title: The 'Jif' Statement: Judgment-Based Control Flow via TypeSafe Jev
+Version: 0.0.1
+Authors@R: person("Yue", "Shentu", role = c("aut", "cre"), email = "n43368410@gmail.com")
+Description: Replaces hard-coded 'if' conditions with calibrated semantic decisions.
+    Wraps the TypeSafe Jev 'System One' API (Choice, Score, Noul primitives) and
+    provides jif()/jmatch() control-flow verbs plus a vectorized evaluator that
+    scores whole data frames (e.g. eCRF narratives) in batched API calls, with
+    calibrated confidence, abstention sentinels, and selection-failure analytics.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports:
+    httr,
+    jsonlite,
+    stats
+Suggests:
+    withr
