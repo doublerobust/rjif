@@ -131,7 +131,8 @@ jif <- function(state, question, ..., threshold = 0.5,
       }
       if (is.list(d) || is.character(d)) {
         stop("Rjif: choice criteria must be NAMED (option = description). ",
-             "Got an unnamed ", class(d)[[1L]], " of length ", length(d), ".",
+             "Got an unnamed ", .clean_error_text(class(d)[[1L]], 40L),
+             " of length ", length(d), ".",
              call. = FALSE)
       }
     }

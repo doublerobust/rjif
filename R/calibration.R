@@ -208,8 +208,9 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
     }
     return(out)
   }
-  warning("Rjif: unsupported truth column type (", class(x)[[1L]],
-          "); treating as NA.", call. = FALSE)
+  warning(.clean_error_text(paste0(
+    "Rjif: unsupported truth column type (", class(x)[[1L]],
+    "); treating as NA.")), call. = FALSE)
   rep(NA, length(x))
 }
 
@@ -238,6 +239,7 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
     }
     return(out)
   }
-  stop("Rjif: probability column must be numeric (or a factor with numeric ",
-       "labels); got ", class(x)[[1L]], ".", call. = FALSE)
+  stop(.clean_error_text(paste0(
+    "Rjif: probability column must be numeric (or a factor with numeric ",
+    "labels); got ", class(x)[[1L]], ".")), call. = FALSE)
 }

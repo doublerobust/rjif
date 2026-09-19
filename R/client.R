@@ -125,54 +125,69 @@ jev_key <- function() {
   obj
 }
 
-# Sanitize an R object for RETENTION/PRINTING (audit R4-B2/R5-B3): scrub the
-# live API key and secret patterns from every character value AND every
-# character attribute, recursively (dimnames are lists of character vectors;
-# factor levels are a character attribute whose integer codes stay untouched),
-# with a depth cap so classed list-like objects whose elements are instances
-# of themselves (POSIXlt) cannot exhaust the C stack. Runs AFTER validation,
-# so semantic checks always see the consistent pre-redaction representation
-# (R4-M1).
+# Sanitize an R object for RETENTION/PRINTING (audit R4-B2/R5-B3/R6-B1): ONE
+# recursive policy applied to values AND attributes with equal force. Every
+# character value, every attribute NAME, every attribute VALUE (which may
+# itself be an environment holding a key), recursively, with a depth cap.
+#
+# Round-5's mistake was a second, shallower walker (scrub_attr) for attributes:
+# an environment stashed in an attribute by an honest diagnostic transport
+# never reached the replacement policy and persisted the credential through
+# saveRDS (R6-B1, isolate6). There is now no attribute path that bypasses the
+# value path.
 #
 # Unsupported reference types (functions, environments, calls, symbols,
-# pairlists, weak refs, S4, external pointers) are REPLACED by a redacted
-# placeholder rather than traversed (R5-B3: an environment can hold a key no
-# string scrubber reaches; constraining the retained representation is the
-# auditor-accepted repair).
+# pairlists, weak refs, S4, external pointers, EXPRESSION vectors) are
+# REPLACED by a STATIC placeholder -- never a class-derived string, because a
+# key-bearing class would then leak through the placeholder itself. Raw byte
+# vectors are replaced too: credential bytes hide from every text-level
+# inspection while surviving serialization.
+#
+# Factors: the LEVELS attribute is scrubbed via the same policy while the
+# integer codes stay untouched, so a secret-bearing label becomes
+# [REDACTED-API-KEY] instead of NA.
+#
+# Runs AFTER validation, so semantic checks always see the consistent
+# pre-redaction representation (R4-M1); selected_p is bound before this runs
+# so label collisions here can never move a decision number (R5-B1).
 .redact_value <- function(x, depth = 0L) {
   if (depth > 24L) return("[REDACTED-DEPTH]")
-  if (!is.null(x) && (is.function(x) || is.environment(x) || is.name(x) ||
-      is.call(x) || is.pairlist(x) || isS4(x) ||
-      typeof(x) %in% c("weakref", "externalptr", "char", "..."))) {
-    return(paste0("[REDACTED-", paste(class(x), collapse = "/"), "]"))
+  tt <- typeof(x)
+  if (tt %in% c("environment", "closure", "special", "builtin", "S4", "name",
+                "symbol", "call", "expression", "pairlist", "weakref",
+                "externalptr", "char", "...")) {
+    return("[REDACTED-UNSUPPORTED]")
   }
-  scrub_attr <- function(a, d) {
-    if (is.character(a)) return(.scrub_secrets(.redact_key(a)))
-    if (is.list(a)) {
-      if (d > 24L) return("[REDACTED-DEPTH]")
-      out <- lapply(a, scrub_attr, d = d + 1L)
-      nm <- names(a)
-      if (!is.null(nm)) names(out) <- .scrub_secrets(.redact_key(nm))
-      return(out)
-    }
-    if (d > 24L) return("[REDACTED-DEPTH]")
-    a   # non-text attributes (dim, codes) cannot carry a character secret
-  }
-  scrub_attrs <- function(x, y) {
-    attrs <- attributes(x)
-    for (an in names(attrs)) attributes(y)[[an]] <- scrub_attr(attrs[[an]], 1L)
-    y
-  }
+  if (tt == "raw") return("[REDACTED-BYTES]")
+  # POSIXlt is a classed list whose elements are themselves POSIXlt and whose
+  # attributes (names/levels) are self-referentially sized; re-attaching its
+  # class to a partially-redacted shell raises "names attribute must be the
+  # same length" (round-4's fail-closed N07/N08 residual). Replace it outright
+  # -- a temporal object in response metadata is display metadata, never a
+  # decision input, and losing it is strictly safer than a half-redacted one.
+  if (tt == "list" && inherits(x, "POSIXlt")) return("[REDACTED-UNSUPPORTED]")
   if (is.character(x)) {
     y <- .scrub_secrets(.redact_key(x))
-    return(scrub_attrs(x, y))
-  }
-  if (is.list(x)) {
+  } else if (is.list(x)) {
     y <- lapply(x, .redact_value, depth = depth + 1L)
-    return(scrub_attrs(x, y))
+  } else {
+    y <- x
   }
-  if (!is.null(attributes(x))) return(scrub_attrs(x, x))
-  x
+  attrs <- attributes(x)
+  if (length(attrs)) {
+    clean <- list()
+    for (an in names(attrs)) {
+      clean[[.scrub_secrets(.redact_key(as.character(an)))]] <-
+        .redact_value(attrs[[an]], depth = depth + 1L)
+    }
+    # class goes LAST: assigning `class<-` re-compensates an object's names
+    # (data.frame, POSIXct, ...) and would otherwise clobber the scrubbed
+    # names attribute we just set
+    cls <- clean[["class"]]; clean[["class"]] <- NULL
+    attributes(y) <- clean
+    if (!is.null(cls)) y <- structure(y, class = cls)
+  }
+  y
 }
 
 # Answer values accepted by the client, given the question that was sent.
@@ -407,8 +422,10 @@ jev_choice_q <- function(instructions, criteria) {
          call. = FALSE)
   }
   if (anyDuplicated(nms)) {
-    stop("Rjif: choice criteria names must be unique; duplicated: ",
-         paste(unique(nms[duplicated(nms)]), collapse = ", "), call. = FALSE)
+    stop(.clean_error_text(paste0(
+      "Rjif: choice criteria names must be unique; duplicated: ",
+      paste(unique(nms[duplicated(nms)]), collapse = ", "), ".")),
+      call. = FALSE)
   }
   structure(list(type = "choice", instructions = instructions,
                  criteria = as.list(criteria)), class = "jev_question")
@@ -452,9 +469,11 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
     stop("Rjif: every question in 'questions' must be named.", call. = FALSE)
   }
   if (anyDuplicated(names(questions))) {
-    stop("Rjif: question names must be unique; duplicated: ",
-         paste(unique(names(questions)[duplicated(names(questions))]),
-               collapse = ", "), call. = FALSE)
+    stop(.clean_error_text(paste0(
+      "Rjif: question names must be unique; duplicated: ",
+      paste(unique(names(questions)[duplicated(names(questions))]),
+            collapse = ", "), ".")),
+      call. = FALSE)
   }
   ok <- vapply(questions, inherits, logical(1), "jev_question")
   if (!all(ok)) stop("Rjif: build questions with jev_noul_q/jev_choice_q/jev_score_q.",

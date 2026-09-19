@@ -850,6 +850,84 @@ if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
   do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
 
 # ===========================================================================
+cat("\n16. round-6 audit regressions (Astra R6-B1/B2)\n")
+fake_key <- "astra_R6_FAKE_opaque_7Qa9"
+old_env_key <- Sys.getenv("TYPESAFE_API_KEY", unset = NA)
+Sys.setenv(TYPESAFE_API_KEY = fake_key)
+# serialized streams contain NUL bytes: grepRaw on the bytes, never rawToChar
+has_key_bytes <- function(x)
+  length(grepRaw(fake_key, serialize(x, NULL), fixed = TRUE)) > 0L
+expect("R6-B1: an environment stashed in an ATTRIBUTE by an honest diagnostic transport cannot persist the key",
+       { ctx <- new.env(parent = emptyenv())
+         ctx$headers <- list(Authorization = paste("Bearer", fake_key))
+         tr <- function(body) list(answers = list(q = list(
+           type = "noul", noul = 0.9,
+           metadata = list(elapsed = structure(0.02, request_context = ctx)))))
+         withr_options(Rjif.transport = tr, {
+           z <- suppressWarnings(jev_eval("s", list(q = jev_noul_q("x"))))
+           d <- suppressWarnings(jif("t", jev_noul_q("x")))
+           !has_key_bytes(z) && !has_key_bytes(d) &&
+             identical(attr(z$q$raw$metadata$elapsed, "request_context"),
+                       "[REDACTED-UNSUPPORTED]")
+         }) })
+expect("R6-B1: expression, raw bytes, attributes-of-attributes and key-bearing classes all scrubbed",
+       { cases <- list(
+           expression = list(type = "noul", noul = 0.9, meta = expression(fake_key)),
+           raw_bytes  = list(type = "noul", noul = 0.9,
+                             headers = charToRaw(paste("Auth:", fake_key))),
+           attr_of_attr = list(type = "noul", noul = 0.9,
+                               meta = structure(1.5, note = fake_key)),
+           key_class  = list(type = "noul", noul = 0.9,
+                             tagged = structure(list(), class = fake_key)))
+         all(vapply(cases, function(ans) {
+           tr <- function(body) list(answers = list(q = ans))
+           z <- suppressWarnings(withr_options(Rjif.transport = tr,
+                 jev_eval("s", list(q = jev_noul_q("x")))))
+           !has_key_bytes(z)
+         }, logical(1))) })
+expect("R6-B1/N07: POSIXlt metadata is replaced cleanly (no names-length attribute error)",
+       { lt <- as.POSIXlt(as.POSIXct(0.9, origin = "1970-01-01", tz = "UTC"))
+         tr <- function(body) list(answers = list(q = list(type = "noul",
+                                                           noul = 0.9, when = lt)))
+         got <- withr_options(Rjif.transport = tr,
+           tryCatch(jev_eval("s", list(q = jev_noul_q("x"))),
+                    error = function(e) conditionMessage(e)))
+         !(is.character(got) && grepl("names' attribute", got)) &&
+           !has_key_bytes(got) })
+expect("R6-B1: a secret-labelled factor keeps its rows (redacted label, not NA)",
+       { fl <- factor(c("safe", fake_key), levels = c("safe", fake_key))
+         tr <- function(body) list(answers = list(q = list(type = "noul",
+                                                           noul = 0.9, obs = fl)))
+         z <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_noul_q("x")))))
+         f2 <- z$q$raw$obs
+         !has_key_bytes(z) && !any(is.na(f2)) })
+expect("R6-B2: duplicate question names in an error never echo the key",
+       { msg <- withr_options(
+           Rjif.transport = function(body) list(answers = list()),
+           tryCatch(jev_eval("s", stats::setNames(list(jev_noul_q("e"),
+                                                       jev_noul_q("e")),
+                                                  c(fake_key, fake_key))),
+                    error = function(e) conditionMessage(e)))
+         is.character(msg) && !grepl(fake_key, msg, fixed = TRUE) })
+expect("R6-B2: duplicate choice criteria names in an error never echo the key",
+       { msg <- tryCatch(jev_choice_q("route",
+                           stats::setNames(c("A", "B"), c(fake_key, fake_key))),
+                         error = function(e) conditionMessage(e))
+         is.character(msg) && !grepl(fake_key, msg, fixed = TRUE) })
+expect("R5-B1 semantics unchanged after the attribute rework: collision keeps selected p=0.1",
+       { offered <- list("Bearer option_alpha" = "first",
+                         "Bearer option_beta" = "second")
+         tr <- function(body) list(answers = list(q = list(
+           choice = "Bearer option_beta",
+           probabilities = stats::setNames(list(0.9, 0.1), names(offered)))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
+         isTRUE(all.equal(jprob(a), 0.1)) })
+if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
+  do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
+
+# ===========================================================================
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
