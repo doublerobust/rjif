@@ -5,8 +5,8 @@ reads some text or data (the "state") plus your questions, and returns
 probabilities instead of prose: the probability that a statement is true, a
 pick from a list of options with the full distribution, or a position on an
 ordered rating scale. It's meant for the fuzzy branching you'd otherwise code
-with keyword rules — is this report about a side effect, which team owns this
-ticket, how severe is it.
+with keyword rules. Is this report about a side effect? Which team owns this
+ticket? How severe is it?
 
 The output is a predicted probability, so treat it like one: keep an explicit
 home for the uncertain cases, and check calibration on your own data before
@@ -39,15 +39,15 @@ adding one doesn't change the others.
 
 If the model gives no usable number, or the probability falls below the
 `confidence_floor` you set, `jif()` returns `NA` rather than guessing. A plain
-`if (jif(...))` then stops with an error — that's the design working: you don't
+`if (jif(...))` then stops with an error. That's the design working: you don't
 want undecided rows sliding into the else branch. Use `j_ifelse()` and give the
 `unknown` arm somewhere to go.
 
 `jif_reason()` says which case you're in:
 
-- `"confidence unavailable with a floor set"` — the API returned nothing for
+- `"confidence unavailable with a floor set"`: the API returned nothing for
   this question. A missing answer, not a low one.
-- `"probability 0.612 < confidence_floor 0.700"` — there is an answer, and you
+- `"probability 0.612 < confidence_floor 0.700"`: there is an answer, and you
   decided it's not strong enough to act on.
 
 These call for different fixes (send better state, vs move the floor), so
@@ -55,16 +55,15 @@ don't pool them.
 
 ## Confidence is spread, not accuracy
 
-Two different numbers come back, and they answer different questions:
+Two different numbers come back, and they answer different questions.
+`jprob()` is the probability behind the decision: P(yes) for noul, P(chosen
+option) for choice, the API confidence for score. `jconf()` is the API's
+confidence, which its docs define as how concentrated the probability
+distribution is. High confidence means the model put its mass on one answer,
+not that the answer is right.
 
-- `jprob()` — the probability behind the decision: P(yes) for noul, P(chosen
-  option) for choice, the API confidence for score.
-- `jconf()` — the API's confidence, which its docs define as how concentrated
-  the probability distribution is. High confidence means the model put its
-  mass on one answer, not that the answer is right.
-
-For a score question, `jif(threshold = 2)` compares against the *level* ("the
-position reaches moderate"), not against a probability.
+For a score question, `jif(threshold = 2)` compares against the level (the
+position reaches "moderate"), not against a probability.
 
 ## Batches
 
@@ -72,8 +71,8 @@ The API takes one state per call, so `jev_score_many()` loops over your
 vector, one HTTP request per row, and returns a data frame with `decision`,
 `option`, `p`, `confidence`, `abstained`, and `error` columns. Errors are
 captured per row: one unparsable narrative doesn't discard the other 4,999.
-For score rows the `option` column holds the position as text (e.g.
-`"1.050"`).
+For score rows the `option` column holds the position as text, e.g.
+`"1.050"`.
 
 ## Checking calibration
 
@@ -89,37 +88,38 @@ selection_curve(df)     # as you raise the floor: what share of rows do you
                         # keep, and what's the event rate among them?
 ```
 
-Know what they are:
-
-- `ece()` is a point estimate using the classic equal-width bins (Naeini et
-  al.; Guo et al. 2017). It is not an upper bound on the true error, and it is
-  not the bias-corrected version (Nixon et al. 2022). It warns under 30 usable
-  rows; under about 100 it's mostly bin noise. Quote `attr(rc, "n_used")`
-  along with the number.
-- Row accounting is exact: every dropped row lands in exactly one bucket, and
-  the buckets add up to `nrow(df)`.
-- `selection_curve()`'s `pos_rate` is the event prevalence among kept rows — a
-  coverage/PPV view, not accuracy (that would need true negatives too).
-- Reliability curves only mean something against gold truth. Score Jev against
-  another model's labels and you've measured agreement, not calibration.
-- No standard errors, no bands, no hypothesis test. A 10-bin curve from 50
-  rows is a sketch.
+Know what they are. `ece()` is a point estimate using the classic equal-width
+bins (Naeini et al.; Guo et al. 2017). It is not an upper bound on the true
+error, and it is not the bias-corrected version (Nixon et al. 2022). It warns
+under 30 usable rows; under about 100 it's mostly bin noise. Quote
+`attr(rc, "n_used")` along with the number. Row accounting is exact: every
+dropped row lands in exactly one bucket, and the buckets add up to `nrow(df)`.
+The `pos_rate` in `selection_curve()` is the event prevalence among kept rows,
+a coverage/PPV view rather than accuracy (that would need true negatives too).
+Reliability curves only mean something against gold truth; score Jev against
+another model's labels and you've measured agreement, not calibration. And
+there are no standard errors, bands, or hypothesis tests anywhere in here. A
+10-bin curve from 50 rows is a sketch.
 
 ## Things to know before you use it
 
-- **It's a hosted API.** You need a `TYPESAFE_API_KEY`, and nothing here runs
-  offline against a real model. Don't send patient or proprietary data until
-  your organization has cleared the vendor.
-- **This package helps you check Jev's calibration. It does not fix it.**
-  Whether the vendor's probabilities behave on your traffic is an empirical
-  question, and this README can't answer it.
-- **Cost and latency grow with rows** (one call per row in `jev_score_many()`;
-  the `batch` argument only controls progress reporting).
-- **`rjif_mock_transport()`** is for testing with no key and no network. Its
-  numbers are deterministic hashes, statistically meaningless, and the source
-  says so.
-- Documentation is inline comments, not man pages. Fine for a 0.0.1; not fine
-  forever.
+It's a hosted API. You need a `TYPESAFE_API_KEY`, and nothing here runs
+offline against a real model. Don't send patient or proprietary data until
+your organization has cleared the vendor.
+
+This package helps you check Jev's calibration. It does not fix it. Whether
+the vendor's probabilities behave on your traffic is an empirical question,
+and this README can't answer it.
+
+Cost and latency grow with rows: `jev_score_many()` is one call per row, and
+the `batch` argument only controls progress reporting.
+
+`rjif_mock_transport()` is for testing with no key and no network. Its
+numbers are deterministic hashes, statistically meaningless, and the source
+says so.
+
+Documentation is inline comments, not man pages. Fine for a 0.0.1; not fine
+forever.
 
 ## Install
 
@@ -131,13 +131,13 @@ Imports `httr`, `jsonlite`, `stats`; no compiled code.
 
 ## Tests
 
-`Rscript tests/smoke.R` — 184 offline assertions against the mock transport
-and scripted fake responses: the abstention behavior, the API response
-contract (including the live-verified continuous-score round trip),
+`Rscript tests/smoke.R` runs 184 offline assertions against the mock
+transport and scripted fake responses: the abstention behavior, the API
+response contract (including the live-verified continuous-score round trip),
 malformed-usage handling, credential-retention boundaries, and the calibration
 analytics.
 
 ## Why "Rjif"
 
-`jif` = judgment-based if. The name follows the `RJDBC`/`RJSONIO` tradition
-for R bindings to a service, and reads as code: *jif, else*.
+`jif` is short for judgment-based if. The name follows the `RJDBC`/`RJSONIO`
+tradition for R bindings to a service, and reads as code: *jif, else*.
