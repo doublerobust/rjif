@@ -192,7 +192,13 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
                 legend = setNames(as.list(lv), as.character(w)),
                 confidence = conf))
   }
-  stop("Rjif mock: unknown question type '", q$type, "'.", call. = FALSE)
+  # q$type is caller-supplied text (the mock transport is EXPORTED and can be
+  # called directly, audit R9-B1): a key echoed here leaves the process in the
+  # condition message even though the wrapped jev_eval route is cleaned at the
+  # outer boundary. Scrub before signaling.
+  stop(.clean_error_text(paste0("Rjif mock: unknown question type '",
+                                as.character(q$type), "'.")),
+       call. = FALSE)
 }
 
 .mock_softmax <- function(x) { x <- x - max(x); e <- exp(x); e / sum(e) }

@@ -979,6 +979,28 @@ expect("R7/R8 supplemental: calibration column-name echo sites (.check_df_cols) 
              is.character(m) && !grepl(fake_key, m, fixed = TRUE) &&
              !length(grepRaw(fake_key, serialize(m, NULL), fixed = TRUE)),
            logical(1))) })
+expect("R9-B1: the DIRECT exported mock transport cannot echo the live key in its unknown-type diagnostic (and the wrapped control stays clean)",
+       { old_k <- Sys.getenv("TYPESAFE_API_KEY", unset = NA)
+         Sys.setenv(TYPESAFE_API_KEY = fake_key)
+         on.exit({ if (is.na(old_k)) Sys.unsetenv("TYPESAFE_API_KEY") else
+                     do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_k)) })
+         direct <- tryCatch(rjif_mock_transport(list(
+                       state = "s",
+                       questions = list(q = list(type = fake_key,
+                                                 instructions = "x")))),
+                     error = function(e) conditionMessage(e))
+         wrapped <- tryCatch(
+           withr_options(Rjif.transport = rjif_mock_transport,
+             jev_eval("s", list(q = list(type = fake_key,
+                                         instructions = "x")))),
+           error = function(e) conditionMessage(e),
+           warning = function(e) conditionMessage(e))
+         cleans <- c(direct, wrapped)
+         all(vapply(cleans, function(m)
+             is.character(m) && !grepl(fake_key, m, fixed = TRUE) &&
+             !length(grepRaw(fake_key, serialize(m, NULL), fixed = TRUE)),
+           logical(1))) &&
+           grepl("REDACTED", direct, fixed = TRUE) })
 expect("R6-B2: duplicate question names in an error never echo the key",
        { msg <- withr_options(
            Rjif.transport = function(body) list(answers = list()),
