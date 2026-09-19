@@ -178,18 +178,38 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
     raws <- vapply(seq_along(lv), function(i)
       .mock_signal(lv[[i]], i, q$instructions), numeric(1))
     w <- seq_along(lv) - 1L
-    conf <- if (is.na(scripted)) round(min(1, max(raws)), 4) else scripted
-    # The contract is an INTEGER level index into the legend (a fractional
-    # "1.5th severity level" is not a thing), so the unscripted weighted mean
-    # is rounded to the nearest level; a scripted value k selects level k
-    # directly, clamped into range.
-    sc <- if (is.na(scripted)) {
-      round(sum(raws * w) / max(1e-9, sum(raws)))
+    # The live contract (docs + verified 2026-09-19): score is a CONTINUOUS
+    # probability-weighted position that can land between levels, and the
+    # answer carries a per-level distribution over level-index strings.
+    if (is.na(scripted)) {
+      probs <- .mock_softmax(raws)
+      sc <- sum(probs * w)
+      conf <- round(max(probs), 4)
+      sprob <- setNames(lapply(probs, round, 4), as.character(w))
+      # keep score == weighted mean of the ROUNDED distribution we emit
+      sc <- round(sum(as.numeric(sprob) * w), 4)
     } else {
-      round(min(max(0, round(scripted * (length(lv) - 1))), length(lv) - 1))
+      # scripted value s in [0,1]: place it on the level scale; split mass
+      # between the two adjacent levels so the emitted distribution's
+      # weighted mean equals the score exactly (self-consistency is asserted
+      # by the client validator, so the mock must satisfy it too).
+      sc <- scripted * (length(lv) - 1L)
+      lo <- as.integer(floor(sc)); hi <- min(as.integer(ceiling(sc)), length(lv) - 1L)
+      f <- sc - lo
+      acc <- numeric(length(lv))
+      names(acc) <- as.character(w)
+      # accumulate by numeric position (lo == hi when sc is integral; mass
+      # must sum to 1 either way). NEVER as.character(lo)+1L -- character
+      # arithmetic is a hard error in R 4.6 (found by the suite).
+      acc[[lo + 1L]] <- acc[[lo + 1L]] + (1 - f)
+      acc[[hi + 1L]] <- acc[[hi + 1L]] + f
+      sprob <- setNames(lapply(acc, function(x) round(x, 4)), names(acc))
+      conf <- round(1 - f, 4)
+      sc <- round(sum(as.numeric(sprob) * w), 4)
     }
     return(list(type = "score", score = as.double(sc),
                 legend = setNames(as.list(lv), as.character(w)),
+                probabilities = sprob,
                 confidence = conf))
   }
   # q$type is caller-supplied text (the mock transport is EXPORTED and can be

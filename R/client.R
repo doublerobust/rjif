@@ -363,18 +363,54 @@ jev_answer_valid <- function(ans, q) {
     return(list(value = v, probs = probs, confidence = conf_valid,
                 valid = TRUE, reason = NA_character_))
   }
-  # score: a LEVEL INDEX into the rubric, not a continuous value
+  # score: a CONTINUOUS position on the level scale (live API + official docs,
+  # 2026-09-19: "probability-weighted value across your levels; can land
+  # between levels" -- the audit rounds' integer-index assumption was OUR
+  # invention and wrongly abstained every real score answer).
   v <- suppressWarnings(as.double(v))
   k <- length(q$criteria)
-  if (length(v) != 1L || is.na(v) || !is.finite(v) || abs(v - round(v)) > 1e-9 ||
-      v < 0 || v > k - 1) {
-    return(invalid(paste0("score value is not an integer level index in 0..", k - 1)))
+  if (length(v) != 1L || is.na(v) || !is.finite(v) || v < 0 || v > k - 1) {
+    return(invalid(paste0("score value outside the level range 0..", k - 1)))
   }
   if (is.na(conf_valid)) {
     return(invalid("score answer lacks a confidence in [0, 1]"))
   }
-  list(value = v, probs = NULL, confidence = conf_valid,
-       valid = TRUE, reason = NA_character_)
+  # per-level distribution (docs example: score 1.05 with p = {0, .95, .05}).
+  # Keyed by level-index strings; names must cover 0..k-1 exactly.
+  sprob <- NULL
+  if (!is.null(ans[["probabilities"]])) {
+    pv <- ans[["probabilities"]]
+    pn <- names(pv)
+    vals <- .prob_vector_values(pv)
+    want <- as.character(seq_len(k) - 1L)
+    if (is.null(vals) || is.null(pn) || anyDuplicated(pn) ||
+        !setequal(pn, want) || anyNA(vals) || any(!is.finite(vals)) ||
+        any(vals < 0) || any(vals > 1)) {
+      return(invalid("score probability vector malformed (names, NA, or range)"))
+    }
+    s <- sum(vals)
+    if (abs(s - 1) > 0.01) {
+      return(invalid(paste0("score probabilities sum to ", formatC(s, format = "f",
+                                                                   digits = 3),
+                            ", not ~1")))
+    }
+    vals <- vals / s
+    vals <- vals[match(pn, names(vals))]
+    # trust but verify: the score must be the weighted mean of its own
+    # distribution. Legend keys are level indices as strings ("0".."k-1"),
+    # NOT 1-based (author bug found by the suite: an off-by-one here made
+    # every valid continuous score self-contradict by exactly 1.0).
+    # 0.05 tolerance covers 2-decimal rounding in the API.
+    wm <- sum(vals * as.integer(pn))
+    if (abs(wm - v) > 0.05) {
+      return(invalid(paste0("score ", formatC(v, format = "f", digits = 3),
+                            " contradicts its probability-weighted mean ",
+                            formatC(wm, format = "f", digits = 3))))
+    }
+    sprob <- stats::setNames(lapply(vals, function(x) x), pn)
+  }
+  return(list(value = v, probs = sprob, confidence = conf_valid,
+              valid = TRUE, reason = NA_character_))
 }
 
 # Default transport over httr. Returns the parsed response list.

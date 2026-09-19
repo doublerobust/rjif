@@ -490,6 +490,24 @@ withr_options(Rjif.transport = function(body) list(answers = list(), usage = "oo
   err_msg(jev_eval("s", list(q = jev_noul_q("x")))))
 expect("a malformed usage block does not corrupt the counters",
        is.numeric(jev_usage()$input_tokens) && identical(jev_usage()$calls, 2L))
+expect("mock score answer is a CONTINUOUS score with a self-consistent per-level distribution (live API shape, 2026-09-19)",
+       { a <- withr_options(Rjif.transport = rjif_mock_transport(c("i" = 0.5)),
+            jev_eval("s", list(q = jev_score_q("i",
+              c("none", "mild", "moderate", "severe")))))$q
+         pv <- as.numeric(a$probs[c("0", "1", "2", "3")])
+         wm <- sum(pv * 0:3)
+         is.numeric(a$value) && !is.na(a$value) &&
+           all(names(a$probs) == c("0", "1", "2", "3")) &&
+           abs(sum(pv) - 1) < 1e-3 && abs(wm - a$value) < 0.05 &&
+           is.numeric(jprob(a)) && !is.na(jconf(a)) })
+expect("a score that contradicts its own distribution is abstained, not trusted (live-shape guard)",
+       { a <- suppressWarnings(withr_options(
+           Rjif.transport = function(body) list(answers = list(q = list(
+             type = "score", score = 1.4, confidence = 0.9,
+             legend = list("0" = "none", "1" = "mild", "2" = "severe"),
+             probabilities = list("0" = 0.1, "1" = 0.8, "2" = 0.1)))),
+           jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe")))))$q)
+         is.na(a$value) && grepl("contradicts", a$contract %||% "", fixed = TRUE) })
 expect("the real transport demands an API key",
        grepl("TYPESAFE_API_KEY", err_msg(withr_options(Rjif.transport = NULL,
          transport_httr(list(state = "s")))), fixed = TRUE))
