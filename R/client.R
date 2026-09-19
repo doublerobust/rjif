@@ -124,7 +124,22 @@ jev_key <- function() {
   # into c(NA, NA) and broke positional probability vectors. Redact names only
   # when they exist; apply .scrub_secrets too, not just the exact-key match.
   redact_deep <- function(x) {
-    if (is.character(x)) return(.scrub_secrets(.redact_key(x)))
+    if (is.character(x)) {
+      # P29/R3-B2: gsub preserves names, so scrubbing VALUES only left the
+      # exact key alive as a vector NAME. Scrub names here too, keeping NULL
+      # names NULL (shape preservation, R2-M1).
+      nm <- names(x)
+      x <- .scrub_secrets(.redact_key(x))
+      if (!is.null(nm)) names(x) <- .scrub_secrets(.redact_key(nm))
+      return(x)
+    }
+    if (is.factor(x)) {
+      # P33: a factor's key can hide in its levels attribute; levels are
+      # textual representation, scrub them in place.
+      lv <- .scrub_secrets(.redact_key(levels(x)))
+      x <- factor(as.character(x), levels = unique(lv))
+      return(x)
+    }
     if (is.list(x)) {
       nm <- names(x)
       if (!is.null(nm)) names(x) <- .scrub_secrets(.redact_key(as.character(nm)))
@@ -144,33 +159,59 @@ jev_key <- function() {
 # Returns list(value, probs, confidence, valid); when the answer violates the
 # contract, valid = FALSE with value/confidence forced NA, and reason explains
 # the violation (surfaced by jif_reason()/the batch error column).
-.confidence_scalar <- function(x) {
-  # Accept a scalar numeric, a 1-element list wrapping one, or a JSON null.
-  # Booleans are REJECTED, not coerced: as.double(TRUE) is 1.0, and a literal
-  # confidence:true in an API response must never fabricate full certainty
-  # (audit R2-B1). Strings coerce (only "5"->5 then range-check rejects it);
-  # NA fails the [0,1] range check downstream.
-  if (is.list(x) && length(x) == 1L) x <- x[[1L]]
-  if (is.null(x)) return(NA_real_)
-  if (is.logical(x)) return(NA_real_)
-  if (!is.atomic(x) || length(x) != 1L || is.na(x)) return(NA_real_)
-  if (is.numeric(x)) return(as.double(x))
-  suppressWarnings(as.double(as.character(x)))
+
+# Unwrap a JSON array that wraps exactly one scalar: ONLY an UNNAMED 1-element
+# list (that is what [] decodes to under simplifyVector = FALSE). A NAMED
+# 1-element list is a JSON object -- {wrong: 1} -- and is never a legitimate
+# scalar wrapper (audit R3-B1: accepting named objects let
+# confidence=list(wrong=1) pass as 1.0). Unsupported atomic types (factor,
+# raw, complex, POSIXct...) are rejected by type, never coerced by a
+# catch-all as.double/as.character.
+.unwrap_scalar <- function(x) {
+  if (is.list(x)) {
+    if (length(x) != 1L || !is.null(names(x))) return(NULL)  # NULL = reject
+    x <- x[[1L]]
+  }
+  if (is.null(x)) return(NULL)
+  if (is.factor(x) || is.raw(x) || is.complex(x) || inherits(x, "Date") ||
+      inherits(x, "POSIXt")) return(NULL)
+  x
 }
 
-# Probability vectors from the API: list (JSON arrays/objects) or numeric
-# vector. Booleans inside are rejected, never coerced to 1/0 (audit R2-B1).
+.confidence_scalar <- function(x) {
+  # Accept a scalar numeric, an unnamed 1-element array wrapping one, or a
+  # JSON null. Booleans are REJECTED, not coerced: as.double(TRUE) is 1.0, and
+  # a literal confidence:true must never fabricate full certainty (R2-B1).
+  # Character values are rejected too -- the contract promises a number
+  # (R3-B1: "5" previously slipped through a permissive string fallback).
+  if (is.null(x)) return(NA_real_)
+  if (is.list(x)) {
+    x <- .unwrap_scalar(x)
+    if (is.null(x)) return(NA_real_)
+  }
+  if (is.logical(x) || is.character(x) || !is.numeric(x) ||
+      length(x) != 1L || is.na(x)) return(NA_real_)
+  if (!is.finite(x)) return(NA_real_)
+  as.double(x)
+}
+
+# Probability vectors from the API: named list (JSON object), unnamed list
+# (JSON array, positional), or numeric/character vector. Booleans anywhere are
+# rejected, never coerced to 1/0 (R2-B1); named wrappers are rejected (R3-B1).
 .prob_vector_values <- function(pv) {
   if (is.list(pv)) {
     bad <- FALSE
     vals <- vapply(pv, function(p) {
-      if (is.list(p) && length(p) == 1L) p <- p[[1L]]
-      if (is.logical(p) || !is.atomic(p) || length(p) != 1L || is.na(p) ||
-          !is.numeric(p) && !is.character(p)) {
+      if (is.list(p)) {
+        p <- .unwrap_scalar(p)
+        if (is.null(p)) { bad <<- TRUE; return(NA_real_) }
+      }
+      if (is.null(p) || is.logical(p) || is.character(p) || !is.numeric(p) ||
+          length(p) != 1L || is.na(p) || !is.finite(p)) {
         bad <<- TRUE
         return(NA_real_)
       }
-      suppressWarnings(as.double(if (is.character(p)) p else p))
+      as.double(p)
     }, numeric(1))
     if (bad) return(NULL)
     vals
@@ -423,8 +464,12 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
   # against the actual API key before anything can echo it onward.
   raw <- .as_response(raw)
   if (!is.list(raw)) {
-    stop("Rjif: transport response was not a list (got ",
-         class(raw)[[1L]], ").", call. = FALSE)
+    # P32/R3-B2: class(raw) is attacker-influenced text (a pluggable transport
+    # can set class to the key itself); this error is package-generated, AFTER
+    # the transport wrapper, so it must be scrubbed here too.
+    stop(.clean_error_text(paste0("Rjif: transport response was not a list (got ",
+                                  paste(class(raw), collapse = "/"), ").")),
+         call. = FALSE)
   }
   if (is.null(raw[["answers"]])) {
     stop("Rjif: response had no 'answers' field. Raw response fields: ",

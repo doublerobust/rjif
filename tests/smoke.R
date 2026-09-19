@@ -644,6 +644,68 @@ if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
   do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
 
 # ===========================================================================
+cat("\n13. round-3 audit regressions (Astra R3-B1/R3-B2 probes)\n")
+fake_key <- "astra_R2_FAKE_opaque_7Qa9"
+old_env_key <- Sys.getenv("TYPESAFE_API_KEY", unset = NA)
+Sys.setenv(TYPESAFE_API_KEY = fake_key)
+key_leak <- function(x) grepl(fake_key, paste(x, collapse = " "), fixed = TRUE)
+expect("named character-vector answer NAMES are scrubbed, not just values (P29)",
+       # when a transport names its answer object with the raw API key, the
+       # redacted name no longer matches the requested question, so the
+       # honest outcomes are EITHER an answer whose dput shows no key OR a
+       # fail-closed 'missing answer' error whose message carries no key.
+       # What must never happen: the key surviving into any dput output.
+       { got <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = setNames(list(list(type = "noul", noul = 0.9)), fake_key)),
+           tryCatch(capture.output(dput(jev_eval("s", list(q = jev_noul_q("x"))))),
+                    error = function(e) capture.output(dput(conditionMessage(e))))))
+         !key_leak(got) })
+expect("factor levels in raw metadata are scrubbed (P33)",
+       { got <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = structure(
+               factor(c("a", "b"), levels = c(fake_key, "b"))))),
+           tryCatch(jev_eval("s", list(q = jev_noul_q("x"))), error = function(e) e)))
+         is.list(got) && !key_leak(levels(got$q$raw)) })
+expect("a key-bearing class(raw) cannot leak through the not-a-list error (P32)",
+       { got <- suppressWarnings(withr_options(
+           Rjif.transport = function(body) { x <- "y"; class(x) <- fake_key; x },
+           tryCatch(jev_eval("s", list(q = jev_noul_q("x"))),
+                    error = function(e) conditionMessage(e))))
+         is.character(got) && !key_leak(got) })
+expect("a NAMED 1-element object cannot impersonate a scalar wrapper (P36)",
+       { got <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(score = 2, confidence = list(wrong = 1)))),
+           jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe"))))$q))
+         is.na(jvalue(got)) && is.na(jprob(got)) && !is.na(got$contract) })
+expect("valid score confidence at the endpoints still works",
+       { got <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(score = 2, confidence = 0.99))),
+           jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe"))))$q))
+         identical(jvalue(got), 2) && isTRUE(all.equal(jprob(got), 0.99)) })
+expect("an UNNAMED 1-element array still unwraps to its scalar",
+       { got <- suppressWarnings(withr_options(
+           Rjif.transport = function(body)
+             list(answers = list(q = list(noul = list(0.88)))),
+           jev_eval("s", list(q = jev_noul_q("x")))  ))
+         identical(jvalue(got$q), 0.88) })
+expect("real JSON arrays (simplifyVector=FALSE) survive the redactor end-to-end",
+       { resp <- jsonlite::fromJSON(
+           paste0('{"answers":{"q":{"choice":"safety",',
+                  '"probabilities":[0.8,0.2],"confidence":0.8}}}'),
+           simplifyVector = FALSE)
+         got <- suppressWarnings(withr_options(
+           Rjif.transport = function(body) resp,
+           jev_eval("s", list(q = jev_choice_q("i", list(safety = "a",
+                                                          routine = "b"))))$q))
+         identical(jvalue(got), "safety") && isTRUE(all.equal(jprob(got), 0.8)) })
+if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
+  do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
+
+# ===========================================================================
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
