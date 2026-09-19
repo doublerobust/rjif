@@ -1,26 +1,73 @@
-#!/usr/bin/env Rscript
-# Offline smoke test (uses the mock transport — no API key needed).
-# Run: Rscript tests/smoke.R   (or R CMD INSTALL . first, then example below)
+# --- bootstrap: prefer the installed package, fall back to sourcing R/ ---
+loaded <- FALSE
+if (!"package:Rjif" %in% search()) {
+  if (requireNamespace("Rjif", quietly = TRUE)) {
+    suppressPackageStartupMessages(library(Rjif))
+    loaded <- TRUE
+  } else if (dir.exists("R")) {
+    for (f in list.files("R", pattern = "[.]R$", full.names = TRUE)) source(f)
+    cat("  (Rjif not installed: sourced R/ directly)\n")
+  } else {
+    stop("Rjif is not installed and no R/ directory was found; ",
+         "run from the package root or install the package first.")
+  }
+} else {
+  loaded <- TRUE
+}
+# Internals are not on the search path once the package is attached; alias them
+# so the assertions below can exercise them in either mode.
+.pick <- function(nm) {
+  env <- if (loaded) asNamespace("Rjif") else globalenv()
+  get(nm, envir = env)
+}
+as_question       <- .pick(".as_question")
+transport_httr    <- .pick(".transport_httr")
+scrub_secrets     <- .pick(".scrub_secrets")
+clean_error_text  <- .pick(".clean_error_text")
+price_per_mtok    <- .pick("JEV_PRICE_PER_MTOK")
+exports_attached  <- if (loaded) getNamespaceExports("Rjif") else character(0)
 
-# source package files directly so the smoke test works pre-install
-files <- c("R/client.R", "R/jif.R", "R/calibration.R", "R/mock.R")
-for (f in files) source(f)
+# --- scripted mock transport (offline, deterministic) ---
+mock <- rjif_mock_transport(c(
+  "the customer wants a refund" = 0.93,
+  "the customer is asking about product sizing" = 0.06,
+  "the customer wants to speak to a human" = 0.21,
+  "the package arrived on time" = 0.12))
+options(Rjif.transport = mock)
 
-options(Rjif.transport = rjif_mock_transport)
+# --- a transport that fabricates whatever the caller asks for ---
+transport_with_answers <- function(ans) function(body) list(answers = ans)
 
-ticket <- "This jacket sucks! The zipper jammed the first time I wore it and now it won't close so I want my money back. Order 11 days old, return window 30 days, $100, one previous order, no refunds."
+fail <- 0L
+expect <- function(label, cond) {
+  cond <- tryCatch(isTRUE(cond), error = function(e) {
+    cat("      (threw: ", conditionMessage(e), ")\n", sep = ""); FALSE })
+  if (isTRUE(cond)) cat(sprintf("  ok   %s\n", label))
+  else { fail <<- fail + 1L; cat(sprintf("  FAIL %s\n", label)) }
+}
+throws <- function(expr) tryCatch({ force(expr); FALSE }, error = function(e) TRUE)
+err_msg <- function(expr) tryCatch({ force(expr); "" }, error = function(e) conditionMessage(e))
+warn_msg <- function(expr) {
+  # capture the warning text: the previous version muffled the warning inside a
+  # calling handler and then returned "", so every warning assertion failed by
+  # construction rather than on the behaviour it was testing.
+  msgs <- character(0)
+  withCallingHandlers(
+    tryCatch(force(expr), error = function(e) NULL),
+    warning = function(w) {
+      msgs <<- c(msgs, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    })
+  paste(msgs, collapse = "\n")
+}
+capture <- function(expr) paste(capture.output(force(expr)), collapse = "\n")
 
-# 1. j_ifelse triage ------------------------------------------------------------
-q_wants_refund <- "the customer wants a refund"
-decision <- jif(ticket, q_wants_refund, threshold = 0.5)
-cat("wants refund? ", decision, " (abstained: ", jif_abstained(decision), ")\n", sep = "")
-action <- j_ifelse(decision,
-  yes = "auto-issue return label",
-  no  = "reply asking what they want",
-  unknown = "queue for human")
-cat("action: ", action, "\n", sep = "")
-
-# 2. batch scoring over a mini eCRF-ish data frame ------------------------------
+# --- shared fixtures ---
+# The canonical customer ticket, and a mini eCRF-ish corpus with gold labels.
+ticket <- paste0("This jacket sucks! The zipper jammed the first time I wore ",
+                 "it and now it won't close so I want my money back. Order 11 ",
+                 "days old, return window 30 days, $100, one previous order, ",
+                 "no refunds.")
 narratives <- c(
   "patient reports feeling off since dose 3, daughter drove her to urgent care",
   "mild headache resolved spontaneously, no intervention",
@@ -28,25 +75,503 @@ narratives <- c(
   "lab ALT 3x ULN noted, dose held pending repeat",
   "no adverse events reported this visit")
 truth <- c(TRUE, FALSE, FALSE, TRUE, FALSE)   # "warrants safety review"
+Q_REFUND <- "the customer wants a refund"
+Q_SIZING <- "the customer is asking about product sizing"
+Q_SAE <- "a serious adverse event is being reported"
 
-df <- jev_score_many(narratives, "a serious adverse event is being reported")
+branches3 <- list(returns = "product return or refund request",
+                  quality_control = "product defect, batch quality issue",
+                  human_agent = "ambiguous or needs judgment")
+
+# ===========================================================================
+cat("1. jif() / j_ifelse() triage\n")
+# unscripted transport: values are hash-derived and MEANINGLESS, so only the
+# contract is asserted (type, attributes, no crash), never the outcome.
+decision <- jif(ticket, Q_REFUND, threshold = 0.5)
+expect("returns a single logical with abstained + answer attributes",
+       is.logical(decision) && length(decision) == 1L &&
+       !is.null(attr(decision, "abstained")) &&
+       inherits(attr(decision, "answer"), "jev_answer"))
+expect("no floor set -> not abstained", isFALSE(jif_abstained(decision)))
+expect("jif_abstained() is definitively FALSE/TRUE, never NA",
+       is.logical(jif_abstained(decision)) && length(jif_abstained(decision)) == 1L &&
+       !is.na(jif_abstained(decision)))
+# scripted transport: now an outcome assertion IS a documented intent
+expect("scripted 0.93 decides TRUE", isTRUE(jif(ticket, Q_REFUND)))
+expect("scripted 0.06 decides FALSE", isFALSE(jif(ticket, Q_SIZING)))
+expect("undecided value can be dropped into if() without crashing",
+       !throws(if (jif(ticket, Q_REFUND)) 1L else 2L))
+expect("j_ifelse() routes TRUE to yes",
+       identical(j_ifelse(jif(ticket, Q_REFUND), "auto-issue return label",
+                          "reply asking what they want", "queue for human"),
+                 "auto-issue return label"))
+expect("j_ifelse() routes FALSE to no",
+       identical(j_ifelse(jif(ticket, Q_SIZING), "a", "b", "c"), "b"))
+
+cat("\n2. the abstention lane (the core design value)\n")
+crashes <- throws(if (NA) 1L else 2L)
+expect("base R really does error on if (NA) -- why the lane exists", crashes)
+low <- jif(ticket, Q_REFUND, confidence_floor = 0.99)
+expect("under the floor -> abstained", isTRUE(jif_abstained(low)))
+expect("under the floor -> default abstain value is NA", isTRUE(is.na(low)))
+expect("jif_reason() explains the abstention",
+       grepl("confidence_floor", jif_reason(low), fixed = TRUE))
+expect("an abstention DOES crash a bare if() -- loud, not silent", throws(if (low) 1L else 2L))
+expect("abstain = FALSE is an explicit opt-in that routes unknown -> no branch",
+       { d <- jif(ticket, Q_REFUND, confidence_floor = 0.99, abstain = FALSE)
+         isFALSE(d) && isTRUE(jif_abstained(d)) })
+expect("a missing answer value abstains even with confidence_floor = 0",
+       isTRUE(jif_abstained(withr_options(
+         Rjif.transport = transport_with_answers(list(q = list(type = "noul"))),
+         jif("s", jev_noul_q("x"))))))
+expect("a missing answer value errors inside a bare if()",
+       throws(if (jif("s", jev_noul_q("x"), confidence_floor = 0.99)) 1L else 2L))
+expect("j_ifelse() sends an abstention to the unknown lane",
+       identical(j_ifelse(low, "a", "b", "escalate"), "escalate"))
+expect("j_ifelse() sends a bare NA to the unknown lane too",
+       identical(j_ifelse(NA, "a", "b", "unknown"), "unknown"))
+expect("j_ifelse() refuses a vector",
+       grepl("single jif", err_msg(j_ifelse(c(TRUE, FALSE), "a", "b")), fixed = TRUE))
+choice_dec <- jif(ticket, "Which team should own this inquiry?", branches3)
+expect("choice question returns an option name, not TRUE/FALSE",
+       is.character(choice_dec) && choice_dec %in% names(branches3))
+expect("j_ifelse() maps named branches onto the returned option",
+       { got <- j_ifelse(choice_dec,
+                         c(returns = "label", quality_control = "defect ticket"),
+                         NA_character_, "human")
+         # compare on the value, not identical(): a jif() result carries
+         # abstained/answer attributes, so identical() against a bare string
+         # is FALSE even when the option matches.
+         key <- as.character(choice_dec)
+         want <- if (key == "returns") "label" else
+                   if (key == "quality_control") "defect ticket" else "human"
+         identical(got, want) })
+expect("j_ifelse() with named branches sends an unmatched option to unknown",
+       identical(j_ifelse("nothing_matching", c(returns = "label"), "no", "unknown"),
+                 "unknown"))
+
+cat("\n3. jev_score_many() over a mini eCRF corpus\n")
+df <- jev_score_many(narratives, Q_SAE)
+expect("one row per input, same order", identical(nrow(df), length(narratives)))
+expect("columns present",
+       all(c("decision", "option", "p", "confidence", "abstained", "error") %in% names(df)))
+expect("no per-row errors", identical(df$error, rep("", length(narratives))))
+expect("p is finite for every row", all(is.finite(df$p)))
+expect("noul confidence column is always NA (the API sends none)",
+       all(is.na(df$confidence)))
+expect("option column is \"true\"/\"false\" text for noul",
+       all(df$option %in% c("true", "false")))
+expect("decision matches p >= threshold for every row",
+       identical(df$decision, df$p >= 0.5))
+expect("decision is never NA for a scored row", !any(is.na(df$decision)))
+expect("abstained all FALSE with no floor set", identical(df$abstained, rep(FALSE, 5L)))
 df$truth <- truth
-print(df)
+withr_options(Rjif.transport = transport_with_answers(
+  list(q = list(type = "noul", noul = NA_real_))), {
+  d <- jev_score_many("some narrative", jev_noul_q("x"))
+  expect("NA noul from the API -> decision FALSE but abstained TRUE",
+         identical(d$decision, FALSE) && identical(d$abstained, TRUE) && is.na(d$p))
+})
+withr_options(Rjif.transport = transport_with_answers(
+  list(other = list(type = "noul", noul = 0.5))), {
+  d <- jev_score_many(c("a", "b"), jev_noul_q("x"))
+  expect("a missing per-row answer is recorded per row, not fatal",
+         identical(unique(d$error), "Rjif: missing answer for question 'q'.") &&
+         identical(d$abstained, rep(TRUE, 2L)) && identical(d$decision, rep(FALSE, 2L)))
+})
+d2 <- jev_score_many(c(narratives[[1]], NA_character_, narratives[[2]]), Q_SAE)
+expect("an NA state abstains with a note and does not poison its neighbours",
+       identical(d2$abstained, c(FALSE, TRUE, FALSE)) &&
+       identical(d2$error[2], "state is NA") && identical(d2$error[1], ""))
+counter <- 0L
+withr_options(Rjif.transport = function(body) {
+  counter <<- counter + 1L
+  if (counter == 2L) stop("boom")
+  mock(body)
+}, {
+  d3 <- jev_score_many(narratives[1:3], Q_SAE)
+  expect("a transport error is captured per row, not fatal",
+         identical(d3$abstained, c(FALSE, TRUE, FALSE)) && nzchar(d3$error[2]) &&
+         identical(d3$error[1], ""))
+})
+expect("exactly one HTTP-equivalent call per row (batch does not amortise)",
+       (identical(withr_options(Rjif.transport = function(body) {
+          counter <<- counter + 1L; mock(body) },
+          { counter <- 0L; jev_score_many(narratives, Q_SAE, batch = 2L); counter }),
+          5L)))
+dc <- jev_score_many(narratives[1:2], jev_choice_q("what happened?",
+  c(infection = "infectious event", headache = "headache syndrome",
+    other = "other or unspecified")))
+expect("choice rows return a real option name", all(dc$option %in% names(dc$p[[1]])) ||
+       all(dc$option %in% c("infection", "headache", "other")))
+expect("choice p is the chosen option's probability", all(dc$p > 0 & dc$p <= 1))
+ds <- jev_score_many(narratives[[4]], jev_score_q("severity",
+  c("none", "mild", "moderate", "severe", "life-threatening")))
+expect("score row returns a rubric level index in range",
+       ds$p >= 0 && ds$p <= 4 && is.logical(ds$decision))
+expect("score threshold is a LEVEL, not a probability (documented semantics)",
+       isTRUE(jif(narratives[[4]], jev_score_q("severity",
+                   c("none", "mild", "moderate", "severe", "life-threatening")),
+                   threshold = 0)))
+expect("attr n_abstained is reported", identical(attr(df, "n_abstained"), 0L))
+expect("NA floor means abstain always",
+       identical(jev_score_many(narratives[1:2], Q_SAE, confidence_floor = NA)$abstained,
+                 rep(TRUE, 2L)))
 
-# 3. calibration analytics -------------------------------------------------------
-rc <- reliability_curve(df)
-print(rc)
-cat("ECE: ", round(ece(df), 4), "\n", sep = "")
-print(selection_curve(df))
+cat("\n4. calibration analytics (hand-computable cases)\n")
+rc <- reliability_curve(df, n_bins = 2L)
+expect("one row per bin, empty bins kept", identical(nrow(rc), 2L))
+expect("bin labels are the cut labels for the requested bins",
+       identical(rc$bin, c("[0,0.5]", "(0.5,1]")))
+expect("n sums to usable rows", identical(sum(rc$n), attr(rc, "n_used")))
+expect("bin counts match the data (no row silently reassigned)",
+       identical(rc$n, c(sum(df$p <= 0.5), sum(df$p > 0.5))))
+expect("mean_p is the in-bin mean; NA exactly where the bin is empty",
+       isTRUE(all.equal(rc$mean_p[[1]], mean(df$p[df$p <= 0.5]))) &&
+       identical(is.na(rc$mean_p), rc$n == 0L) &&
+       identical(is.na(rc$accuracy), rc$n == 0L))
+empty_bin <- reliability_curve(data.frame(p = c(0.9, 0.9), truth = c(TRUE, TRUE)),
+                               n_bins = 2L)
+expect("an unoccupied bin is a kept row of n = 0 with NA mean_p/accuracy",
+       identical(empty_bin$n, c(0L, 2L)) && is.na(empty_bin$mean_p[[1]]) &&
+       is.na(empty_bin$accuracy[[1]]) &&
+       isTRUE(all.equal(empty_bin$mean_p[[2]], 0.9)))
+default_rc <- reliability_curve(df)
+expect("default n_bins gives 10 rows", identical(nrow(default_rc), 10L))
+expect("only occupied bins have numeric accuracy",
+       identical(!is.na(default_rc$accuracy), default_rc$n > 0L))
+expect("probabilities outside [0,1] are dropped and counted",
+       { oo <- reliability_curve(data.frame(p = c(0.5, 1.4, -0.2, NA),
+                                            truth = c(TRUE, TRUE, TRUE, TRUE)))
+         identical(sum(oo$n), 1L) && identical(attr(oo, "n_out_of_range"), 2L) &&
+         identical(attr(oo, "n_used"), 1L) })
+expect("a truth column of 0/1 numerics is accepted",
+       identical(sum(reliability_curve(data.frame(p = c(0.6, 0.8), truth = c(1, 0)))$n), 2L))
+expect("a truth column of \"yes\"/\"no\" text is accepted",
+       identical(sum(reliability_curve(data.frame(p = c(0.6, 0.8),
+                              truth = c("yes", "no"), n_bins = 2L))$n), 2L))
+expect("an uninterpretable truth column warns and yields no rows",
+       { rc_bad <- NULL
+         msg <- warn_msg(rc_bad <- reliability_curve(
+           data.frame(p = c(0.6), truth = I(list("x")))))
+         grepl("unsupported truth", msg, fixed = TRUE) &&
+         identical(nrow(rc_bad), 10L) && identical(sum(rc_bad$n), 0L) })
+expect("reliability_curve wants a data.frame",
+       grepl("expected a data.frame", err_msg(reliability_curve(list(p = 0.5)))))
+expect("a missing truth column errors helpfully",
+       grepl("missing column", err_msg(reliability_curve(data.frame(p = 0.5))),
+             fixed = TRUE))
+expect("n_bins must be a positive integer",
+       grepl("n_bins", err_msg(reliability_curve(df, n_bins = 0))))
+# ECE: hand-computable. Two occupied bins, |1 - 0.95| and |0 - 0.05|.
+two_bin <- data.frame(p = c(rep(0.95, 3), rep(0.05, 1)),
+                      truth = c(rep(TRUE, 3), FALSE), n_bins = 2L)
+expect("ece() equals the hand-computed weighted sum",
+       isTRUE(all.equal(ece(data.frame(p = c(rep(0.95, 3), rep(0.05, 1)),
+                                       truth = c(rep(TRUE, 3), FALSE)), n_bins = 2L),
+                        0.75 * abs(1 - 0.95) + 0.25 * abs(0 - 0.05))))
+expect("ece() is 0 when every occupied bin is exactly calibrated",
+       isTRUE(all.equal(ece(data.frame(p = c(1, 1, 0, 0),
+                                       truth = c(TRUE, TRUE, FALSE, FALSE)),
+                            n_bins = 2L), 0)))
+expect("over-confident predictions give a large ece()",
+       ece(data.frame(p = c(0.99, 0.99), truth = c(FALSE, FALSE))) > 0.9)
+expect("ece() returns NA (not a flattering 0) when nothing is usable",
+       isTRUE(is.na(suppressWarnings(ece(data.frame(p = numeric(0),
+                                                    truth = logical(0)))))) &&
+       grepl("no scored rows", warn_msg(ece(data.frame(p = numeric(0),
+                                                       truth = logical(0)))), fixed = TRUE))
+expect("ece() ignores empty bins instead of re-weighting on them",
+       isTRUE(all.equal(ece(data.frame(p = c(0.99, 0.99), truth = c(FALSE, FALSE)),
+                            n_bins = 10L), 0.99)))
+sc <- selection_curve(df)
+expect("selection_curve spans the whole default floor sequence", identical(nrow(sc), 20L))
+expect("columns present", all(c("floor", "n", "kept", "coverage", "accuracy",
+                               "escalated") %in% names(sc)))
+expect("coverage is monotone non-increasing in the floor",
+       all(diff(sc$coverage) <= 1e-12))
+expect("coverage + escalated == 1",
+       isTRUE(all.equal(sc$coverage + sc$escalated, rep(1, nrow(sc)))))
+expect("floor 0 keeps every usable row", identical(sc$kept[[1]], attr(sc, "n_usable")))
+expect("kept == round(coverage * n)", identical(sc$kept, as.integer(round(sc$coverage * sc$n))))
+expect("accuracy is NA exactly where nothing clears the floor",
+       identical(is.na(sc$accuracy), sc$kept == 0L))
+sc2 <- selection_curve(data.frame(p = c(0.9, NA, NA, 0.2), truth = c(TRUE, TRUE, FALSE, FALSE)))
+expect("unusable rows stay out of the coverage denominator",
+       identical(attr(sc2, "n_usable"), 2L) && identical(sc2$n[[1]], 2L))
+expect("selection_curve rejects a non-numeric floor_seq",
+       grepl("floor_seq", err_msg(selection_curve(df, floor_seq = "a"))))
+expect("selection_curve warns when there is nothing usable",
+       grepl("no usable rows", warn_msg(selection_curve(data.frame(p = NA_real_,
+                                                                  truth = NA)))))
 
-# 4. jmatch routing --------------------------------------------------------------
-branch <- jmatch(ticket,
-  list(returns = "product return or refund request",
-       quality_control = "product defect, batch quality issue",
-       human_agent = "ambiguous or needs judgment"),
-  instructions = "Which team should own this inquiry?")
-cat("routed to: ", branch, "\n", sep = "")
+cat("\n5. jmatch() routing\n")
+expect("routes the refund ticket to one of the branches",
+       { r <- jmatch(ticket, branches3,
+                     instructions = "Which team should own this inquiry?")
+         is.character(r) && length(r) == 1L && (is.na(r) || r %in% names(branches3)) })
+expect("floor above the winning probability falls back",
+       identical(jmatch(ticket, branches3,
+                        instructions = "Which team should own this inquiry?",
+                        confidence_floor = 0.95, fallback = "human"), "human"))
+expect("floor below the winning probability routes",
+       identical(withr_options(Rjif.transport = transport_with_answers(list(q = list(
+         type = "choice", choice = "returns",
+         probabilities = list(returns = 0.8, quality_control = 0.15, human_agent = 0.05),
+         confidence = 0.8))),
+         jmatch("s", branches3, confidence_floor = 0.05)), "returns"))
+esc <- jmatch(ticket, list(refund_ok = "within return window and wants refund",
+                           escalate_human = "ambiguous, needs judgment",
+                           other = "other or unspecified"),
+              confidence_floor = 0.999, fallback = "FALLBACK")
+expect("a floor nothing clears falls back", identical(esc, "FALLBACK"))
+expect("an escape-hatch winner routes to fallback even with no floor",
+       identical(withr_options(Rjif.transport = transport_with_answers(
+         list(q = list(type = "choice", choice = "other",
+                       probabilities = list(other = 0.91, referral = 0.09)))),
+         jmatch("s", c(referral = "needs a referral", other = "other or unspecified"))),
+         NA_character_))
+expect("abstain_options is customisable",
+       identical(withr_options(Rjif.transport = transport_with_answers(
+         list(q = list(type = "choice", choice = "other",
+                       probabilities = list(other = 0.91, referral = 0.09)))),
+         jmatch("s", c(referral = "needs a referral", other = "other or unspecified"),
+                abstain_options = character(0))), "other"))
+expect("a null choice value falls back",
+       identical(withr_options(Rjif.transport = transport_with_answers(
+         list(q = list(type = "choice", choice = NULL))),
+         jmatch("s", branches3)), NA_character_))
+expect("a missing probabilities block falls back when a floor is set",
+       identical(withr_options(Rjif.transport = transport_with_answers(
+         list(q = list(type = "choice", choice = "returns"))),
+         jmatch("s", branches3, confidence_floor = 0.5, fallback = "F")), "F"))
 
-# 5. usage accounting ------------------------------------------------------------
-print(jev_usage())
+cat("\n6. jev_eval() contract and error paths\n")
+multi <- jev_eval(ticket, list(refund = jev_noul_q(Q_REFUND),
+                               sizing = jev_noul_q(Q_SIZING)))
+expect("answers are named and in the requested order",
+       identical(names(multi), c("refund", "sizing")))
+expect("per-answer class is jev_<type> + jev_answer",
+       identical(class(multi$refund), c("jev_noul", "jev_answer")))
+expect("the answers block is reported in print()",
+       grepl("0.93", capture(print(multi)), fixed = TRUE))
+expect("print() returns its input invisibly",
+       { res <- NULL
+         capture.output(res <- withVisible(print(multi)))
+         identical(res$value, multi) && isFALSE(res$visible) })
+expect("print() renders an NA value as NA, not a blank",
+       grepl("NA", capture(print(withr_options(
+         Rjif.transport = transport_with_answers(list(q = list(type = "noul"))),
+         jev_eval("s", list(q = jev_noul_q("x")))))), fixed = TRUE))
+expect("print() shows the choice distribution and confidence",
+       { s <- capture(print(withr_options(
+           Rjif.transport = transport_with_answers(list(q = list(
+             type = "choice", choice = "b",
+             probabilities = list(a = 0.2, b = 0.8), confidence = 0.8))),
+           jev_eval("s", list(q = jev_choice_q("i", c(a = "x", b = "y")))))))
+         grepl("b=0.800", s, fixed = TRUE) && grepl("conf=0.800", s, fixed = TRUE) })
+expect("print() shows the score legend",
+       { s <- capture(print(withr_options(
+           Rjif.transport = transport_with_answers(list(q = list(
+             type = "score", score = 3, confidence = 0.6,
+             legend = list("0" = "none", "3" = "life-threatening")))),
+           jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "moderate",
+                                                    "life-threatening")))))))
+         grepl("life-threatening", s, fixed = TRUE) })
+expect("a response with no answers field errors and names the fields it got",
+       grepl("no 'answers' field", err_msg(withr_options(
+         Rjif.transport = function(body) list(model = "x"),
+         jev_eval("s", list(q = jev_noul_q("x"))))), fixed = TRUE))
+expect("a non-list response errors cleanly",
+       grepl("response was not a list", err_msg(withr_options(
+         Rjif.transport = function(body) "garbage",
+         jev_eval("s", list(q = jev_noul_q("x"))))), fixed = TRUE))
+expect("a missing per-question answer names the question",
+       grepl("missing answer for question 'q'", err_msg(withr_options(
+         Rjif.transport = transport_with_answers(list(other = list(type = "noul", noul = 0.5))),
+         jev_eval("s", list(q = jev_noul_q("x"))))), fixed = TRUE))
+expect("a null answer value becomes NA rather than crashing",
+       is.na(jvalue(withr_options(
+         Rjif.transport = transport_with_answers(list(q = list(type = "noul"))),
+         jev_eval("s", list(q = jev_noul_q("x")))$q))))
+expect("a vector answer value is coerced to a scalar, not recycled",
+       identical(jvalue(withr_options(
+         Rjif.transport = transport_with_answers(list(q = list(type = "noul",
+                                                              noul = list(0.4, 0.9)))),
+         jev_eval("s", list(q = jev_noul_q("x")))$q)), 0.4))
+expect("a non-numeric noul value becomes NA",
+       is.na(jvalue(withr_options(
+         Rjif.transport = transport_with_answers(list(q = list(type = "noul",
+                                                              noul = "probably"))),
+         jev_eval("s", list(q = jev_noul_q("x")))$q))))
+expect("an answer whose type disagrees with the question is caught",
+       grepl("answered type", warn_msg(withr_options(
+         Rjif.transport = transport_with_answers(list(q = list(type = "choice",
+                                                              noul = 0.5))),
+         jev_eval("s", list(q = jev_noul_q("x")))$q)), fixed = TRUE))
+expect("probabilities arrive as a named numeric list",
+       { pr <- withr_options(Rjif.transport = transport_with_answers(list(q = list(
+           type = "choice", choice = "a", probabilities = list(a = 0.6, b = 0.4)))),
+           jev_eval("s", list(q = jev_choice_q("i", c(a = "x", b = "y"))))$q)$probs
+         identical(names(pr), c("a", "b")) && identical(pr$a, 0.6) })
+expect("state must be a single non-NA string",
+       any(grepl("single non-NA string",
+                 c(err_msg(jev_eval(c("a", "b"), list(q = jev_noul_q("x")))),
+                   err_msg(jev_eval(NA_character_, list(q = jev_noul_q("x")))),
+                   err_msg(jev_eval(42, list(q = jev_noul_q("x")))))), fixed = TRUE))
+expect("empty questions are rejected",
+       grepl("non-empty named list", err_msg(jev_eval("s", list())), fixed = TRUE))
+expect("unnamed questions are rejected",
+       grepl("named list", err_msg(jev_eval("s", list(jev_noul_q("x")))), fixed = TRUE))
+expect("blank question names are rejected",
+       grepl("must be named", err_msg(jev_eval("s", list(a = jev_noul_q("x"),
+                                                        jev_noul_q("y")))), fixed = TRUE))
+expect("duplicated question names are rejected",
+       grepl("unique", err_msg(jev_eval("s", list(a = jev_noul_q("x"),
+                                                  a = jev_noul_q("y")))), fixed = TRUE))
+expect("non-question elements are rejected",
+       grepl("jev_noul_q", err_msg(jev_eval("s", list(a = list(type = "noul")))),
+             fixed = TRUE))
+expect("choice criteria must be named",
+       grepl("named list", err_msg(jev_choice_q("i", c("a", "b"))), fixed = TRUE))
+expect("duplicated choice criteria names are rejected",
+       grepl("unique", err_msg(jev_choice_q("i", c(a = "x", a = "y"))), fixed = TRUE))
+expect("score criteria may not be empty",
+       grepl("non-empty", err_msg(jev_score_q("i", character(0))), fixed = TRUE))
+expect("score criteria may not contain NA or blanks",
+       grepl("empty or NA", err_msg(jev_score_q("i", c("none", NA))), fixed = TRUE))
+expect("named score criteria keep their label in the sent text",
+       identical(unclass(jev_score_q("i", c(none = "no symptoms")))$criteria,
+                 "none: no symptoms"))
+expect("an unknown question type is refused, never silently TRUE",
+       grepl("unknown question type", err_msg(jif("s",
+         structure(list(type = "vibes", instructions = "x"), class = "jev_question"))),
+         fixed = TRUE))
+expect("a jev_question spec is passed through untouched",
+       identical(jev_noul_q("x"), as_question(jev_noul_q("x"))))
+expect("string + unnamed vector is an error, not a guess",
+       grepl("NAMED", err_msg(as_question("q", c("a", "b"))), fixed = TRUE))
+expect("string + NA question is an error",
+       grepl("single non-NA string", err_msg(as_question(NA_character_)), fixed = TRUE))
+expect("threshold must be a single number",
+       grepl("threshold", err_msg(jif("s", jev_noul_q("x"), threshold = c(0.4, 0.6)))))
+expect("confidence_floor must be a single number",
+       grepl("confidence_floor", err_msg(jif("s", jev_noul_q("x"),
+                                            confidence_floor = c(0.1, 0.2)))))
+
+cat("\n7. usage accounting and secret hygiene\n")
+jev_usage_reset()
+expect("reset zeroes the counters", identical(jev_usage()$calls, 0L) &&
+                        identical(jev_usage()$input_tokens, 0L))
+invisible(jif(ticket, Q_REFUND))
+u <- jev_usage()
+expect("calls counted", identical(u$calls, 1L))
+expect("input tokens accumulated from the usage block",
+       identical(u$input_tokens, nchar(ticket, type = "bytes") %/% 4L))
+expect("cost estimate uses the documented rate",
+       isTRUE(all.equal(u$est_cost_usd, u$input_tokens / 1e6 * price_per_mtok)))
+withr_options(Rjif.transport = function(body)
+  list(answers = list(q = list(type = "noul", noul = 0.7)),
+       usage = list(input_tokens = 100, output_tokens = 7)), {
+    jev_usage_reset()
+    jev_eval("s", list(q = jev_noul_q("x")))
+})
+expect("a usage block is summed", identical(jev_usage()$input_tokens, 100L))
+withr_options(Rjif.transport = transport_with_answers(list(q = list(type = "noul",
+                                                                   noul = 0.5))), {
+  jev_usage_reset(); jev_eval("s", list(q = jev_noul_q("x")))
+})
+expect("a call with no usage block still counts as a call", identical(jev_usage()$calls, 1L))
+withr_options(Rjif.transport = function(body) list(answers = list(), usage = "oops"),
+  err_msg(jev_eval("s", list(q = jev_noul_q("x")))))
+expect("a malformed usage block does not corrupt the counters",
+       is.numeric(jev_usage()$input_tokens) && identical(jev_usage()$calls, 2L))
+expect("the real transport demands an API key",
+       grepl("TYPESAFE_API_KEY", err_msg(withr_options(Rjif.transport = NULL,
+         transport_httr(list(state = "s")))), fixed = TRUE))
+expect("no exported or internal object prints the key's value",
+       !any(grepl(Sys.getenv("TYPESAFE_API_KEY"), capture(jev_usage()), fixed = TRUE)) ||
+       !nzchar(Sys.getenv("TYPESAFE_API_KEY")))
+scr <- scrub_secrets("Bearer sk-TESTSECRET12345678 and again sk-TESTSECRET12345678")
+expect("secret scrubbing redacts bearer tokens",
+       !grepl("sk-TESTSECRET12345678", scr, fixed = TRUE) &&
+       grepl("REDACTED", scr, fixed = TRUE))
+expect("error text is length-capped and single-line",
+       { t <- clean_error_text(paste(rep("x\ny", 500), collapse = ""))
+         nchar(t) <= 320L && !grepl("\n", t) })
+# a 401 whose body echoes a key must not re-echo it; verified against a real
+# loopback HTTP server in the audit, exercised here through the same scrubber
+expect("an HTTP failure message never contains the live key",
+       !grepl("sk-REALSECRETKID9999",
+              clean_error_text(paste0(rep("Bearer sk-REALSECRETKID9999 x", 100),
+                                       collapse = "\n")), fixed = TRUE))
+
+cat("\n8. the mock is reproducible and honest about what it is\n")
+expect("mock is the documented two-faced helper: object OR factory",
+       is.function(rjif_mock_transport(c("q" = 0.5))))
+expect("a bad script errors instead of degrading to the hash",
+       grepl("named numeric", err_msg(rjif_mock_transport(list("q" = "0.9"))), fixed = TRUE))
+expect("unscripted values are deterministic across calls",
+       identical(jif(ticket, "an entirely unscripted query about bone density"),
+                 jif(ticket, "an entirely unscripted query about bone density")))
+expect("identical inputs give identical batch output",
+       identical(jev_score_many(narratives, "unscripted question about bone density")$p,
+                 jev_score_many(narratives, "unscripted question about bone density")$p))
+expect("the mock does not depend on the global RNG seed",
+       { set.seed(42); a <- jev_score_many(narratives, "another unscripted query")$p
+         set.seed(7);  b <- jev_score_many(narratives, "another unscripted query")$p
+         identical(a, b) })
+expect("different questions get different values (a batch can discriminate rows)",
+       length(unique(jev_score_many(narratives,
+         jev_noul_q(paste("unscripted question", 1:5)))$p)) > 1L ||
+       length(unique(vapply(1:5, function(i)
+         jev_eval(narratives[[1]], list(q = jev_noul_q(paste("unscripted", i))))$q$value,
+         numeric(1)))) == 5L)
+expect("noul answers from the mock carry no confidence field",
+       is.na(jconf(jev_eval(ticket, list(q = jev_noul_q("an unscripted query")))$q)) ||
+       is.null(jconf(jev_eval(ticket, list(q = jev_noul_q("an unscripted query")))$q)))
+expect("mock choice probabilities sum to 1",
+       isTRUE(all.equal(sum(unlist(withr_options(
+         Rjif.transport = rjif_mock_transport(c("i" = 0.5)),
+         jev_eval("s", list(q = jev_choice_q("i", c(a = "x", b = "y"))))$q)$probs)), 1,
+         tolerance = 1e-4)))
+expect("mock score legend is a level-index -> description map",
+       identical(names(withr_options(Rjif.transport = rjif_mock_transport(c("i" = 0.5)),
+         jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe"))))$q)$legend),
+         c("0", "1", "2")))
+expect("the unscripted hash is spread, not concentrated (no threshold is safe by luck)",
+       { v <- vapply(1:300, function(i)
+           jev_eval("state", list(q = jev_noul_q(paste("q", i))))$q$value, numeric(1))
+         min(v) < 0.05 && max(v) > 0.95 && length(unique(round(v, 2))) > 90 })
+
+cat("\n9. NAMESPACE / API surface\n")
+if (loaded) {
+  exports_ns <- ls(envir = asNamespace("Rjif"), all.names = FALSE)
+  want <- c("ece", "j_ifelse", "jconf", "jif", "jif_abstained", "jev_choice_q",
+            "jev_eval", "jev_noul_q", "jev_score_many", "jev_score_q", "jev_usage",
+            "jev_usage_reset", "jmatch", "jprob", "jvalue", "reliability_curve",
+            "rjif_mock_transport", "selection_curve")
+  missing_exports <- setdiff(want, exports_attached)
+  cat("  exports visible on attach: ", length(exports_attached), "\n", sep = "")
+  expect("every documented public function is exported",
+         identical(missing_exports, character(0)))
+  expect("print.jev_answers is registered as an S3 method",
+         is.function(utils::getS3method("print", "jev_answers", optional = TRUE)))
+  expect("no function that exists in R/ is missing from NAMESPACE",
+         identical(setdiff(c("jif_reason", ".as_question"), c(exports_attached,
+                  ls(envir = asNamespace("Rjif"), all.names = TRUE))), character(0)))
+  # internals must NOT leak into the user's search path
+  expect("internal helpers are not exported",
+         !any(c(".as_question", ".mock_hash01", "transport_with_answers") %in%
+                exports_attached))
+} else {
+  cat("  (skipped: exercising the sourced files, not an installed namespace)\n")
+}
+
+# ===========================================================================
+cat("\n")
+if (fail > 0L) {
+  cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
+  quit(save = "no", status = 1L)
+}
 cat("SMOKE OK\n")
