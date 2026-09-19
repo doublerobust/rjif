@@ -154,7 +154,7 @@ jev_key <- function() {
   if (depth > 24L) return("[REDACTED-DEPTH]")
   tt <- typeof(x)
   if (tt %in% c("environment", "closure", "special", "builtin", "S4", "name",
-                "symbol", "call", "expression", "pairlist", "weakref",
+                "symbol", "language", "expression", "pairlist", "weakref",
                 "externalptr", "char", "...")) {
     return("[REDACTED-UNSUPPORTED]")
   }

@@ -870,6 +870,18 @@ expect("R6-B1: an environment stashed in an ATTRIBUTE by an honest diagnostic tr
              identical(attr(z$q$raw$metadata$elapsed, "request_context"),
                        "[REDACTED-UNSUPPORTED]")
          }) })
+expect("R7-B1: a call object attached by an ordinary debugging transport (typeof 'language') cannot persist the key",
+       { inv <- (function(key) match.call())(paste("Bearer", fake_key))
+         tr <- function(body) list(answers = list(q = list(
+           type = "noul", noul = 0.9,
+           metadata = list(invocation = structure(0.02, request = inv)))))
+         withr_options(Rjif.transport = tr, {
+           z <- suppressWarnings(jev_eval("s", list(q = jev_noul_q("x"))))
+           d <- suppressWarnings(jif("t", jev_noul_q("x")))
+           !has_key_bytes(z) && !has_key_bytes(d) &&
+             identical(attr(z$q$raw$metadata$invocation, "request"),
+                       "[REDACTED-UNSUPPORTED]")
+         }) })
 expect("R6-B1: expression, raw bytes, attributes-of-attributes and key-bearing classes all scrubbed",
        { cases <- list(
            expression = list(type = "noul", noul = 0.9, meta = expression(fake_key)),
