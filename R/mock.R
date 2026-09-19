@@ -101,10 +101,14 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
   tolower(trimws(as.character(inst[[1L]])))
 }
 
-# Deterministic pseudo-signal in (0, 1) from a 31-bit FNV-1a of the text. The
-# offset basis is R's 2166136261L notation (2^31 + 18613253); XOR is done on
-# 16-bit halves and every product stays below 2^53, so the arithmetic is exact
-# and reproducible on any double-precision build.
+# Deterministic pseudo-signal in (0, 1) from a 31-bit FNV-1a style hash of the
+# text. XOR is done on 16-bit halves. NOTE (audit m3): the multiply step can
+# transiently exceed 2^53 for long inputs (max observed ~3.2e16), so the double
+# result is NOT guaranteed to be an exact integer before the modulo. That costs
+# a tiny amount of low-bit entropy; since this feeds a *mock* whose numbers are
+# explicitly meaningless, and the same input still always produces the same
+# output on the same machine and R build, we accept it rather than add a
+# bignum dependency. Do not use this hash anywhere correctness matters.
 .mock_hash01 <- function(txt) {
   ch <- utf8ToInt(txt)
   h <- 2166136261
@@ -169,14 +173,16 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
       .mock_signal(lv[[i]], i, q$instructions), numeric(1))
     w <- seq_along(lv) - 1L
     conf <- if (is.na(scripted)) round(min(1, max(raws)), 4) else scripted
-    # a scripted value steers which rubric level is returned, so a test can ask
-    # for level k and get level k
+    # The contract is an INTEGER level index into the legend (a fractional
+    # "1.5th severity level" is not a thing), so the unscripted weighted mean
+    # is rounded to the nearest level; a scripted value k selects level k
+    # directly, clamped into range.
     sc <- if (is.na(scripted)) {
-      round(sum(raws * w) / max(1e-9, sum(raws)), 3)
+      round(sum(raws * w) / max(1e-9, sum(raws)))
     } else {
-      min(max(0, round(scripted * (length(lv) - 1))), length(lv) - 1)
+      round(min(max(0, round(scripted * (length(lv) - 1))), length(lv) - 1))
     }
-    return(list(type = "score", score = sc,
+    return(list(type = "score", score = as.double(sc),
                 legend = setNames(as.list(lv), as.character(w)),
                 confidence = conf))
   }

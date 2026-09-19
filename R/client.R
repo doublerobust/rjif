@@ -61,13 +61,186 @@ jev_key <- function() {
   txt
 }
 
-# One line, no control characters, hard-capped length.
+# One line, no control characters, hard-capped length. Every string that is
+# about to become user-visible error/warning/persisted text passes through here,
+# so this is also where the actual API key is redacted (pattern scrubbing alone
+# cannot catch an opaque key echoed back by the vendor).
 .clean_error_text <- function(txt, limit = JEV_ERROR_BODY_LIMIT) {
+  txt <- .redact_key(txt)
   txt <- .scrub_secrets(txt)
   txt <- gsub("[\r\n\t\001-\037]", " ", txt, perl = TRUE)
   txt <- gsub("[[:space:]]{2,}", " ", txt)
   if (nchar(txt, type = "bytes") > limit) txt <- paste0(substr(txt, 1L, limit), "...")
   trimws(txt)
+}
+
+# Replace the caller's actual API key, wherever it appears in text that is about
+# to become an error, warning, or persisted string. Pattern-based scrubbing
+# alone cannot catch an opaque key echoed back by the vendor, so every outward
+# path also runs this exact-substring redaction (.as_response enforces it at
+# the parse boundary; jev_score_many guards its per-row error column too).
+.redact_key <- function(txt) {
+  key <- Sys.getenv("TYPESAFE_API_KEY", "")
+  if (nzchar(key)) {
+    txt <- gsub(key, "[REDACTED-API-KEY]", txt, fixed = TRUE)
+  }
+  txt
+}
+
+# Validate the parsed response object against the documented contract before
+# anything is read from it. jsonlite::fromJSON(..., simplifyVector = FALSE)
+# yields nested lists; R's $ does PREFIX partial matching, so a field named
+# "answersx" used to satisfy raw$answers — hence [[ always. Field names,
+# scalar shapes, value ranges, option membership, and probability
+# normalisation are all checked here, once, fail-closed: an invalid answer
+# arrives downstream as value = NA, which jif() and jev_score_many() abstain
+# on. Invalid probabilities are never clamped or truncated into decisions.
+.as_response <- function(obj) {
+  if (!is.list(obj)) return(obj)
+  nms <- names(obj)
+  if (is.null(nms)) nms <- character(0)
+  if (anyDuplicated(nms)) {
+    stop("Rjif: response object contains duplicate field names (malformed JSON).",
+         call. = FALSE)
+  }
+  answers_idx <- which(nms == "answers")
+  if (length(answers_idx)) {
+    raw_answers <- obj[[answers_idx[[1L]]]]
+    if (!is.list(raw_answers)) {
+      stop("Rjif: response 'answers' was not an object.", call. = FALSE)
+    }
+    anms <- names(raw_answers)
+    if (is.null(anms)) anms <- character(0)
+    if (anyDuplicated(anms)) {
+      stop("Rjif: 'answers' contains duplicate question keys with conflicting values.",
+           call. = FALSE)
+    }
+  }
+  # deep-redact every string in the response (names and values): an opaque API
+  # key echoed anywhere in the body must not survive into printed output.
+  redact_deep <- function(x) {
+    if (is.character(x)) return(.redact_key(x))
+    if (is.list(x)) {
+      names(x) <- .redact_key(as.character(names(x)))
+      return(lapply(x, redact_deep))
+    }
+    x
+  }
+  redact_deep(obj)
+}
+
+# Answer values accepted by the client, given the question that was sent.
+# Returns list(value, probs, confidence, valid); when the answer violates the
+# contract, valid = FALSE with value/confidence forced NA, and reason explains
+# the violation (surfaced by jif_reason()/the batch error column).
+jev_answer_valid <- function(ans, q) {
+  if (is.null(ans) || !is.list(ans)) {
+    return(list(value = NA, probs = NULL, confidence = NA_real_,
+                valid = FALSE, reason = "answer missing or not an object"))
+  }
+  if (!is.null(ans[["type"]])) {
+    t1 <- ans[["type"]]
+    if (!(is.character(t1) && length(t1) == 1L && !is.na(t1))) {
+      return(list(value = NA, probs = NULL, confidence = NA_real_,
+                  valid = FALSE, reason = "answer 'type' field is not a single string"))
+    }
+    if (!identical(t1, q$type)) {
+      return(list(value = NA, probs = NULL, confidence = NA_real_,
+                  valid = FALSE,
+                  reason = paste0("answered type '", t1, "', requested '", q$type, "'")))
+    }
+  }
+  field <- switch(q$type, noul = "noul", choice = "choice", score = "score")
+  if (is.null(field)) {
+    return(list(value = NA, probs = NULL, confidence = NA_real_, valid = FALSE,
+                reason = paste0("unknown question type '", as.character(q$type)[[1L]], "'")))
+  }
+  v <- ans[[field]]
+  if (is.list(v) && length(v) == 1L) v <- v[[1L]]   # unwrap a 1-element JSON array
+  if (is.null(v) || !is.atomic(v) || length(v) != 1L || is.na(v) ||
+      is.logical(v) || is.complex(v)) {
+    return(list(value = NA, probs = NULL, confidence = NA_real_, valid = FALSE,
+                reason = paste0(field, " is not a single non-NA ",
+                                if (q$type == "choice") "string" else "number")))
+  }
+  conf <- ans[["confidence"]]
+  if (is.list(conf) && length(conf) == 1L) conf <- conf[[1L]]
+  if (!is.null(conf) && is.atomic(conf) && length(conf) == 1L && !is.na(conf)) {
+    conf <- suppressWarnings(as.double(conf))       # TRUE/1 is exactly 1, no lie
+  } else {
+    conf <- NA_real_
+  }
+  if (q$type == "noul") {
+    v <- suppressWarnings(as.double(v))
+    if (length(v) != 1L || is.na(v) || !is.finite(v) || v < 0 || v > 1) {
+      return(list(value = NA, probs = NULL, confidence = NA_real_, valid = FALSE,
+                  reason = "noul value outside [0, 1] or not a finite number"))
+    }
+    # The API sends no confidence for noul answers; we do not invent one.
+    return(list(value = v, probs = NULL, confidence = NA_real_,
+                valid = TRUE, reason = NA_character_))
+  }
+  if (q$type == "choice") {
+    v <- as.character(v)
+    offered <- names(q$criteria)
+    if (!(v %in% offered)) {
+      return(list(value = NA, probs = NULL, confidence = conf, valid = FALSE,
+                  reason = paste0("chosen option '", v, "' was not offered")))
+    }
+    if (is.null(ans[["probabilities"]])) {
+      return(list(value = NA, probs = NULL, confidence = conf, valid = FALSE,
+                  reason = "choice answer carries no probability distribution"))
+    }
+    pv <- ans[["probabilities"]]
+    pn <- names(pv)
+    if (is.list(pv)) {
+      pv <- lapply(pv, function(p) if (is.atomic(p) && length(p) == 1L)
+        suppressWarnings(as.double(p)) else NA_real_)
+      pv <- suppressWarnings(vapply(pv, function(x) {
+        if (length(x) == 1L && !is.na(x)) x else NA_real_
+      }, numeric(1)))
+    } else if (!is.numeric(pv)) {
+      pv <- suppressWarnings(as.double(pv))
+    }
+    if (is.null(pn)) {
+      if (length(pv) == length(offered)) pn <- offered   # positional, exact length
+    }
+    if (is.null(pn) || any(!nzchar(pn)) || anyDuplicated(pn) ||
+        anyNA(pv) || any(!is.finite(pv)) || any(pv < 0) || any(pv > 1)) {
+      return(list(value = NA, probs = NULL, confidence = conf, valid = FALSE,
+                  reason = "probability vector malformed (names, NA, or range)"))
+    }
+    if (!setequal(pn, offered)) {
+      return(list(value = NA, probs = NULL, confidence = conf, valid = FALSE,
+                  reason = "probability names do not cover the offered options"))
+    }
+    pv <- stats::setNames(as.list(pv), pn)
+    s <- sum(unlist(pv))
+    if (abs(s - 1) > 0.01) {
+      return(list(value = NA, probs = NULL, confidence = conf, valid = FALSE,
+                  reason = paste0("probabilities sum to ", formatC(s, format = "f",
+                                                                   digits = 3),
+                                  ", not ~1")))
+    }
+    pv <- lapply(pv, function(x) x / s)   # absorb rounding drift only
+    return(list(value = v, probs = pv, confidence = conf,
+                valid = TRUE, reason = NA_character_))
+  }
+  # score: a LEVEL INDEX into the rubric, not a continuous value
+  v <- suppressWarnings(as.double(v))
+  k <- length(q$criteria)
+  if (length(v) != 1L || is.na(v) || !is.finite(v) || abs(v - round(v)) > 1e-9 ||
+      v < 0 || v > k - 1) {
+    return(list(value = NA, probs = NULL, confidence = conf, valid = FALSE,
+                reason = paste0("score value is not an integer level index in 0..",
+                                k - 1)))
+  }
+  if (is.na(conf) || !is.finite(conf) || conf < 0 || conf > 1) {
+    return(list(value = NA, probs = NULL, confidence = NA_real_, valid = FALSE,
+                reason = "score answer lacks a confidence in [0, 1]"))
+  }
+  list(value = v, probs = NULL, confidence = conf, valid = TRUE,
+       reason = NA_character_)
 }
 
 # Default transport over httr. Returns the parsed response list.
@@ -152,9 +325,15 @@ jev_score_q <- function(instructions, criteria) {
 # jev_eval(state = <character>, questions = list(a = jev_noul_q(...), ...))
 # returns a 'jev_answers' list, one entry per question, in the same order.
 jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-latest")) {
-  state <- .as_scalar(state, "character")
-  if (is.na(state)) {
-    stop("Rjif: state must be a single non-NA string.", call. = FALSE)
+  # The API accepts exactly ONE state per call. A vector here used to be
+  # silently truncated to its first element (audit M2): reject it and point
+  # callers at jev_score_many(), which loops properly.
+  if (!is.character(state) || length(state) != 1L || is.na(state)) {
+    stop("Rjif: state must be a single non-NA string",
+         if (is.character(state) && length(state) > 1L)
+           paste0(" (got ", length(state), "; use jev_score_many() for vectors)")
+         else ".",
+         call. = FALSE)
   }
   if (!is.list(questions) || is.null(names(questions)) || !length(questions)) {
     stop("Rjif: questions must be a non-empty named list of jev_*_q() specs.", call. = FALSE)
@@ -176,89 +355,71 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
 
   transport <- getOption("Rjif.transport")
   raw <- if (is.function(transport)) transport(body) else .transport_httr(body)
+  # Enforce the response contract at the parse boundary: exact field names (no
+  # $ partial matching), duplicate keys rejected, and every string deep-redacted
+  # against the actual API key before anything can echo it onward.
+  raw <- .as_response(raw)
   if (!is.list(raw)) {
     stop("Rjif: transport response was not a list (got ",
          class(raw)[[1L]], ").", call. = FALSE)
   }
-  if (is.null(raw$answers)) {
+  if (is.null(raw[["answers"]])) {
     stop("Rjif: response had no 'answers' field. Raw response fields: ",
          .clean_error_text(paste(names(raw), collapse = ", "), 120L), ".",
          call. = FALSE)
   }
-  if (!is.list(raw$answers)) {
+  if (!is.list(raw[["answers"]])) {
     stop("Rjif: response 'answers' was not an object.", call. = FALSE)
   }
 
-  # Token accounting. usage is optional (mock transports omit it); 'calls'
-  # counts every attempted call so cost reporting can never under-count.
+  # Token accounting. usage is optional (mock transports omit it). 'calls'
+  # counts every call for which a response arrived and reached decoding --
+  # NOT calls whose transport threw before responding (the vendor may or may
+  # not have billed those; we do not claim to know). Token totals are clamped
+  # to a finite, non-negative integer within .Machine$integer.max; a malformed
+  # or absurd usage block never discards a delivered answer (audit M3).
   billed <- 0L
-  # usage is optional AND may be malformed ("oops", a vector, a bare string):
-  # only a list can carry input_tokens, and a malformed usage block must not
-  # abort a call whose answer we already have.
-  if (is.list(raw$usage)) {
-    it <- suppressWarnings(as.double(raw$usage$input_tokens))
-    if (length(it) == 1L && !is.na(it) && is.finite(it) && it >= 0) billed <- as.integer(it)
+  u <- raw[["usage"]]
+  if (is.list(u)) {
+    it <- suppressWarnings(as.double(u[["input_tokens"]][[1L]]))
+    if (length(it) == 1L && !is.na(it) && is.finite(it) && it >= 0 &&
+        it <= .Machine$integer.max) billed <- as.integer(it)
   }
   .RjifEnv$usage$calls <- .RjifEnv$usage$calls + 1L
   .RjifEnv$usage$input_tokens <- .RjifEnv$usage$input_tokens + billed
 
   ans <- lapply(names(questions), function(nm) {
-    a <- raw$answers[[nm]]
+    a <- raw[["answers"]][[nm]]
     if (is.null(a)) stop("Rjif: missing answer for question '", nm, "'.", call. = FALSE)
     qtype <- questions[[nm]]$type
-    value <- switch(qtype,
-      noul   = .as_scalar(a$noul, "double"),
-      choice = .as_scalar(a$choice, "character"),
-      score  = .as_scalar(a$score, "double"),
-      stop("Rjif: unknown question type '", qtype, "' for question '", nm, "'.",
-           call. = FALSE))
-    # A scored question whose answer carries a different 'type' than requested
-    # means we would label the number with the wrong scale: refuse the answer.
-    if (!is.null(a$type) && !identical(as.character(a$type)[[1L]], qtype)) {
-      warning("Rjif: question '", nm, "' was sent as type '", qtype,
-              "' but the API answered type '", as.character(a$type)[[1L]],
-              "'; answer discarded as NA.", call. = FALSE)
-      value <- NA
+    checked <- jev_answer_valid(a, questions[[nm]])
+    if (!isTRUE(checked$valid)) {
+      warning("Rjif: answer for question '", nm, "' violated the API contract (",
+              checked$reason, "); treated as no answer (NA).", call. = FALSE)
     }
-    probs <- NULL
-    if (!is.null(a$probabilities)) {
-      if (is.list(a$probabilities)) {
-        probs <- lapply(a$probabilities, function(p) suppressWarnings(as.double(p[[1L]])))
-      } else {
-        pn <- if (!is.null(names(a$probabilities))) names(a$probabilities) else
-          if (!is.null(questions[[nm]]$criteria)) names(questions[[nm]]$criteria) else
-            as.character(seq_along(a$probabilities))
-        probs <- setNames(as.list(suppressWarnings(as.double(a$probabilities))), pn)
-      }
-    }
-    conf <- suppressWarnings(as.double(a$confidence))
-    if (length(conf) != 1L || is.na(conf)) conf <- NA_real_
-    # NOTE: the API sends no confidence for a noul answer, and we do not invent
-    # one. The noul score IS the probability the assertion holds, and jprob()
-    # returns exactly that for noul answers; mirroring it into `confidence`
-    # would make jconf() report a number the API never sent. Callers that need
-    # a threshold on a noul answer use prob (see jif(confidence_floor=)).
     structure(list(
       question   = nm,
       type       = qtype,
-      value      = if (qtype == "choice") .as_scalar(value, "character") else
-                                              suppressWarnings(as.double(value)),
-      probs      = probs,
-      confidence = conf,
-      legend     = a$legend,
+      value      = checked$value,
+      probs      = checked$probs,
+      confidence = checked$confidence,
+      contract   = if (isTRUE(checked$valid)) NA_character_ else checked$reason,
+      legend     = a[["legend"]],
       raw        = a
     ), class = c(paste0("jev_", qtype), "jev_answer"))
   })
   names(ans) <- names(questions)
-  structure(ans, model = .as_scalar(raw$model, "character") %||% model,
+  structure(ans, model = .as_scalar(raw[["model"]], "character") %||% model,
             class = "jev_answers")
 }
 
-# Null/empty/NA coalesce. base R only ships `%||%` from 4.4, and rlang's is not
-# a dependency we want, so this mirrors base exactly: a NULL or length-0 left
-# side falls back; a *single* atomic NA falls back; an atomic NA *vector* such
-# as c(NA, 0.3) is returned untouched rather than raising R >= 4.2's
-# "length = 2 in coercion to logical(1)".
+# Null/empty/NA coalesce. base R only ships `%||%` from 4.4. This variant
+# mirrors base for NULL and length-0 left-hand sides, and ADDITIONALLY coalesces
+# a single atomic NA -- which base 4.4 does NOT do (base returns NA). That
+# extension is intentional here (jconf() treats "API sent NA" as "API sent
+# nothing") but it means `%||%` is not drop-in identical to base's; if you port
+# code, remember the difference. An atomic NA *vector* such as c(NA, 0.3) is
+# returned untouched rather than raising R >= 4.2's length-1 coercion error.
 `%||%` <- function(a, b) {
   if (is.null(a) || length(a) == 0L) return(b)
   if (length(a) == 1L && is.na(a)) return(b)
@@ -270,9 +431,12 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
 # The answer's value: noul/score -> numeric 0-1 / level index; choice -> option name.
 jvalue <- function(ans) ans$value
 
-# Reported confidence. For a noul answer the API sends no separate confidence
-# field, so this mirrors the noul score itself (see jprob()). It is NA when the
-# API sent no usable value at all.
+# Reported confidence: the API's separate confidence scalar, present only on
+# choice and score answers. For a noul answer the API sends no confidence at
+# all, so this is NA by design -- jprob() is the accessor that reports
+# whichever probability backs the decision (noul score / chosen option p /
+# score confidence). Do not threshold noul answers with jconf(); jif() and
+# jev_score_many() apply confidence_floor to jprob() for exactly this reason.
 jconf <- function(ans) `%||%`(ans$confidence, NA_real_)
 
 # Probability that the picked answer is right: for noul the noul score, for
