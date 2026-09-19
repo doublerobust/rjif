@@ -508,6 +508,34 @@ expect("a score that contradicts its own distribution is abstained, not trusted 
              probabilities = list("0" = 0.1, "1" = 0.8, "2" = 0.1)))),
            jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe")))))$q)
          is.na(a$value) && grepl("contradicts", a$contract %||% "", fixed = TRUE) })
+expect("R11-B1: a score distribution supplied as a NAMED NUMERIC VECTOR (not just a list) is accepted and not mis-abstained",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "score", score = 1.05, confidence = 0.9,
+           legend = list("0" = "low", "1" = "middle", "2" = "high"),
+           probabilities = c("0" = 0, "1" = 0.95, "2" = 0.05))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_score_q("severity",
+                 c("low", "middle", "high")))))$q)
+         ok1 <- !is.na(a$value) && abs(a$value - 1.05) < 1e-9 &&
+                identical(names(a$probs), c("0", "1", "2"))
+         # reordered named numeric vector keeps each value under its own level
+         tr2 <- function(body) list(answers = list(q = list(
+           type = "score", score = 1.05, confidence = 0.9,
+           legend = list("0" = "low", "1" = "middle", "2" = "high"),
+           probabilities = c("2" = 0.05, "0" = 0, "1" = 0.95))))
+         a2 <- suppressWarnings(withr_options(Rjif.transport = tr2,
+                jev_eval("s", list(q = jev_score_q("severity",
+                  c("low", "middle", "high")))))$q)
+         ok2 <- !is.na(a2$value) &&
+                identical(as.numeric(a2$probs[c("0","1","2")]), c(0, 0.95, 0.05))
+         # the batch consumer must not abstain either
+         ds <- suppressWarnings(withr_options(
+                Rjif.transport = tr,
+                jev_score_many("s", jev_score_q("severity",
+                  c("low", "middle", "high")), threshold = 1)))
+         ok3 <- isTRUE(ds$decision[[1L]]) && !isTRUE(ds$abstained[[1L]]) &&
+                identical(ds$error[[1L]], "")
+         ok1 && ok2 && ok3 })
 expect("the real transport demands an API key",
        grepl("TYPESAFE_API_KEY", err_msg(withr_options(Rjif.transport = NULL,
          transport_httr(list(state = "s")))), fixed = TRUE))

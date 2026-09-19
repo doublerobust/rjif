@@ -260,7 +260,10 @@ jev_key <- function() {
     if (bad) return(NULL)
     vals
   } else if (is.numeric(pv)) {
-    as.double(pv)
+    # as.double() DROPS names (audit R11-B1: the score reindexing step then
+    # matched every name to NA and mis-abstained a perfectly valid named
+    # numeric distribution). Preserve the pairing here, once, for all callers.
+    stats::setNames(as.double(pv), names(pv))
   } else {
     # R4-B1: no catch-all coercion. Character ("0.9"), complex, raw, factor,
     # logical and temporal vectors are REJECTED, not silently as.double()'d.
