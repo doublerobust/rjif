@@ -90,7 +90,7 @@ jev_key <- function() {
 # Validate the parsed response object against the documented contract before
 # anything is read from it. jsonlite::fromJSON(..., simplifyVector = FALSE)
 # yields nested lists; R's $ does PREFIX partial matching, so a field named
-# "answersx" used to satisfy raw$answers — hence [[ always. Field names,
+# "answersx" used to satisfy raw$answers -- hence [[ always. Field names,
 # scalar shapes, value ranges, option membership, and probability
 # normalisation are all checked here, once, fail-closed: an invalid answer
 # arrives downstream as value = NA, which jif() and jev_score_many() abstain
