@@ -955,6 +955,30 @@ expect("R6-B1: a secret-labelled factor keeps its rows (redacted label, not NA)"
                jev_eval("s", list(q = jev_noul_q("x")))))
          f2 <- z$q$raw$obs
          !has_key_bytes(z) && !any(is.na(f2)) })
+expect("R7/R8 supplemental: calibration column-name echo sites (.check_df_cols) never emit the LIVE key env var - all three message forms scrubbed",
+       { old_k <- Sys.getenv("TYPESAFE_API_KEY", unset = NA)
+         Sys.setenv(TYPESAFE_API_KEY = fake_key)
+         on.exit({ if (is.na(old_k)) Sys.unsetenv("TYPESAFE_API_KEY") else
+                     do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_k)) })
+         dfk <- data.frame(0.9, stringsAsFactors = FALSE)
+         names(dfk)[1] <- fake_key
+         msgs <- c(
+           # requested column present, truth missing: Available: echoes the key
+           tryCatch(Rjif::reliability_curve(dfk, "p", "y"),
+                    error = function(e) conditionMessage(e)),
+           # missing-column echo path with the key as the requested name
+           tryCatch(Rjif::reliability_curve(data.frame(p = 0.5, y = 1,
+                                 check.names = FALSE,
+                                 stringsAsFactors = FALSE),
+                      fake_key, "y"),
+                    error = function(e) conditionMessage(e)),
+           # both-echo path: key on both sides of the message
+           tryCatch(Rjif::reliability_curve(dfk, fake_key, "y"),
+                    error = function(e) conditionMessage(e)))
+         all(vapply(msgs, function(m)
+             is.character(m) && !grepl(fake_key, m, fixed = TRUE) &&
+             !length(grepRaw(fake_key, serialize(m, NULL), fixed = TRUE)),
+           logical(1))) })
 expect("R6-B2: duplicate question names in an error never echo the key",
        { msg <- withr_options(
            Rjif.transport = function(body) list(answers = list()),

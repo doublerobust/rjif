@@ -160,8 +160,13 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
   if (!is.data.frame(df)) stop("Rjif: expected a data.frame.", call. = FALSE)
   miss <- setdiff(c(p, truth), names(df))
   if (length(miss)) {
-    stop("Rjif: data.frame is missing column(s): ", paste(miss, collapse = ", "),
-         ". Available: ", paste(names(df), collapse = ", "), call. = FALSE)
+    # caller-supplied column names are echoed into the message; scrub before
+    # signaling so a key-bearing name never leaves the process (audit R7/R8
+    # supplemental: calibration.R:159-164 unwrapped echo sites)
+    stop(.clean_error_text(paste0(
+      "Rjif: data.frame is missing column(s): ", paste(miss, collapse = ", "),
+      ". Available: ", paste(names(df), collapse = ", "), ".")),
+      call. = FALSE)
   }
   invisible(TRUE)
 }
