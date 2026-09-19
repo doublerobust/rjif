@@ -118,8 +118,9 @@ the `batch` argument only controls progress reporting.
 numbers are deterministic hashes, statistically meaningless, and the source
 says so.
 
-Documentation is inline comments, not man pages. Fine for a 0.0.1; not fine
-forever.
+Help pages cover the exported functions
+(`?jif`, `?jev_eval`, `?reliability_curve`); inline comments carry the
+rest.
 
 ## Install
 
