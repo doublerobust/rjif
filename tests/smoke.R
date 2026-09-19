@@ -870,6 +870,47 @@ expect("R6-B1: an environment stashed in an ATTRIBUTE by an honest diagnostic tr
              identical(attr(z$q$raw$metadata$elapsed, "request_context"),
                        "[REDACTED-UNSUPPORTED]")
          }) })
+expect("R8-B1: a compiled expression (compiler::compile, typeof 'bytecode') attached as ordinary diagnostic metadata cannot persist the key",
+       { request <- call("request",
+                         Authorization = paste("Bearer", fake_key))
+         compiled <- compiler::compile(request)
+         stopifnot(typeof(compiled) == "bytecode")
+         tr <- function(body) {
+           a <- if (body$questions$q$type == "choice")
+             list(choice = "alpha",
+                  probabilities = list(alpha = 0.9, beta = 0.1))
+           else list(noul = 0.9)
+           a$metadata <- list(elapsed = structure(0.02,
+                                                  compiled_request = compiled))
+           list(answers = list(q = a))
+         }
+         withr_options(Rjif.transport = tr, {
+           z <- suppressWarnings(jev_eval("s", list(q = jev_noul_q("x"))))
+           d <- suppressWarnings(jif("t", jev_noul_q("x")))
+           c1 <- !has_key_bytes(z) && !has_key_bytes(d) &&
+             identical(attr(z$q$raw$metadata$elapsed, "compiled_request"),
+                       "[REDACTED-UNSUPPORTED]")
+           # and disassembly of the retained artifact reveals nothing
+           retained <- attr(z$q$raw$metadata$elapsed, "compiled_request")
+           c2 <- !grepl(fake_key, paste(capture.output(print(retained)),
+                                        collapse = "\n"), fixed = TRUE)
+           c1 && c2
+         }) })
+expect("R8: inverted retention guard -- every non-plain-data typeof becomes the placeholder (bytecode, promise-form symbols, closures, environments, calls, S4, externalptr); plain numeric/logical/character/NULL still retained losslessly",
+       { tr2 <- function(body) list(answers = list(q = list(
+           type = "noul", noul = 0.9,
+           meta = list(bcd = compiler::compile(call("f", fake_key)),
+                       env = emptyenv(), fn = function() fake_key,
+                       sym = as.name(fake_key),
+                       keep_num = 42L, keep_chr = "safe", keep_null = NULL))))
+         z <- suppressWarnings(withr_options(Rjif.transport = tr2,
+               jev_eval("s", list(q = jev_noul_q("x")))))
+         m <- z$q$raw$meta
+         !has_key_bytes(z) &&
+           all(vapply(m[c("bcd", "env", "fn", "sym")], identical, logical(1),
+                      "[REDACTED-UNSUPPORTED]")) &&
+           identical(m$keep_num, 42L) && identical(m$keep_chr, "safe") &&
+           is.null(m$keep_null) })
 expect("R7-B1: a call object attached by an ordinary debugging transport (typeof 'language') cannot persist the key",
        { inv <- (function(key) match.call())(paste("Bearer", fake_key))
          tr <- function(body) list(answers = list(q = list(

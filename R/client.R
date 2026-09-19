@@ -150,12 +150,20 @@ jev_key <- function() {
 # Runs AFTER validation, so semantic checks always see the consistent
 # pre-redaction representation (R4-M1); selected_p is bound before this runs
 # so label collisions here can never move a decision number (R5-B1).
+# INVERTED GUARD (round 8): the blocklist was being serially discovered by the
+# auditor -- R7-B1 missed "language", R8-B1 missed "bytecode" (a compiled
+# expression from the standard compiler::compile(), whose constant pool carries
+# literal credentials through saveRDS while print/dput conceal it), plus the
+# native "promise" supplemental disclosure. From now on retention keeps ONLY
+# the plain-data typeof() universe and recurses into lists/attributes; every
+# other type -- including any SEXPTYPE invented after this commit -- becomes
+# the placeholder. Do NOT evaluate, force or disassemble a code container to
+# scrub it; replace it.
 .redact_value <- function(x, depth = 0L) {
   if (depth > 24L) return("[REDACTED-DEPTH]")
   tt <- typeof(x)
-  if (tt %in% c("environment", "closure", "special", "builtin", "S4", "name",
-                "symbol", "language", "expression", "pairlist", "weakref",
-                "externalptr", "char", "...")) {
+  if (!tt %in% c("logical", "integer", "double", "complex", "character",
+                 "raw", "list", "NULL")) {
     return("[REDACTED-UNSUPPORTED]")
   }
   if (tt == "raw") return("[REDACTED-BYTES]")
@@ -166,12 +174,13 @@ jev_key <- function() {
   # -- a temporal object in response metadata is display metadata, never a
   # decision input, and losing it is strictly safer than a half-redacted one.
   if (tt == "list" && inherits(x, "POSIXlt")) return("[REDACTED-UNSUPPORTED]")
-  if (is.character(x)) {
-    y <- .scrub_secrets(.redact_key(x))
-  } else if (is.list(x)) {
-    y <- lapply(x, .redact_value, depth = depth + 1L)
-  } else {
+  if (tt == "NULL") return(NULL)
+  if (tt %in% c("logical", "integer", "double", "complex")) {
     y <- x
+  } else if (tt == "character") {
+    y <- .scrub_secrets(.redact_key(x))
+  } else {
+    y <- lapply(x, .redact_value, depth = depth + 1L)
   }
   attrs <- attributes(x)
   if (length(attrs)) {
