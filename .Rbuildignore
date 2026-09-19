@@ -2,3 +2,5 @@
 ^results/
 ^\.Rhistory
 ^USE_CASES\.md
+^AUDIT_.*\.md$
+^\.github$

@@ -59,13 +59,16 @@ Then the part that actually matters:
 
 ```r
 reliability_curve(df)      # bin: mean probability vs observed accuracy
-ece(df)                    # expected calibration error
-selection_curve(df)        # coverage vs accuracy as you raise the floor
+ece(df)                    # expected calibration error (estimates, never bounds:
+                           # a 4.5-in-10 bin can understate a true error of 54-in-100;
+                           # ece() warns when <30 rows survive the drop filters)
+selection_curve(df)        # coverage vs event-rate (pos_rate) as you raise the floor
 ```
 
-A probability you have not audited is a superstition. `selection_curve()` is the
-operationally interesting view: at what confidence floor do you stop escalating,
-and what accuracy do you give up to get there.
+A probability you have not audited is a superstition. `reliability_curve()`
+accounts for every dropped row in mutually-exclusive buckets that add up to
+`nrow(df)`, and `selection_curve()` reports the positive-event rate among kept
+rows (read it as prevalence/PPV, not decision accuracy).
 
 ## Honest limitations
 

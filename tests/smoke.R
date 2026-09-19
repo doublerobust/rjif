@@ -169,15 +169,16 @@ df$truth <- truth
 withr_options(Rjif.transport = transport_with_answers(
   list(q = list(type = "noul", noul = NA_real_))), {
   d <- jev_score_many("some narrative", jev_noul_q("x"))
-  expect("NA noul from the API -> decision FALSE but abstained TRUE",
-         identical(d$decision, FALSE) && identical(d$abstained, TRUE) && is.na(d$p))
+  expect("NA noul from the API -> decision NA (undecided), abstained TRUE (audit B2)",
+         identical(d$decision, NA) && identical(d$abstained, TRUE) && is.na(d$p) &&
+         identical(d$option, NA_character_))
 })
 withr_options(Rjif.transport = transport_with_answers(
   list(other = list(type = "noul", noul = 0.5))), {
   d <- jev_score_many(c("a", "b"), jev_noul_q("x"))
   expect("a missing per-row answer is recorded per row, not fatal",
          identical(unique(d$error), "Rjif: missing answer for question 'q'.") &&
-         identical(d$abstained, rep(TRUE, 2L)) && identical(d$decision, rep(FALSE, 2L)))
+         identical(d$abstained, rep(TRUE, 2L)) && identical(d$decision, rep(NA, 2L)))
 })
 d2 <- jev_score_many(c(narratives[[1]], NA_character_, narratives[[2]]), Q_SAE)
 expect("an NA state abstains with a note and does not poison its neighbours",
@@ -286,7 +287,7 @@ expect("ece() ignores empty bins instead of re-weighting on them",
                             n_bins = 10L), 0.99)))
 sc <- selection_curve(df)
 expect("selection_curve spans the whole default floor sequence", identical(nrow(sc), 20L))
-expect("columns present", all(c("floor", "n", "kept", "coverage", "accuracy",
+expect("columns present", all(c("floor", "n", "kept", "coverage", "pos_rate",
                                "escalated") %in% names(sc)))
 expect("coverage is monotone non-increasing in the floor",
        all(diff(sc$coverage) <= 1e-12))
@@ -294,8 +295,8 @@ expect("coverage + escalated == 1",
        isTRUE(all.equal(sc$coverage + sc$escalated, rep(1, nrow(sc)))))
 expect("floor 0 keeps every usable row", identical(sc$kept[[1]], attr(sc, "n_usable")))
 expect("kept == round(coverage * n)", identical(sc$kept, as.integer(round(sc$coverage * sc$n))))
-expect("accuracy is NA exactly where nothing clears the floor",
-       identical(is.na(sc$accuracy), sc$kept == 0L))
+expect("pos_rate is NA exactly where nothing clears the floor",
+       identical(is.na(sc$pos_rate), sc$kept == 0L))
 sc2 <- selection_curve(data.frame(p = c(0.9, NA, NA, 0.2), truth = c(TRUE, TRUE, FALSE, FALSE)))
 expect("unusable rows stay out of the coverage denominator",
        identical(attr(sc2, "n_usable"), 2L) && identical(sc2$n[[1]], 2L))
@@ -394,11 +395,12 @@ expect("a null answer value becomes NA rather than crashing",
        is.na(jvalue(withr_options(
          Rjif.transport = transport_with_answers(list(q = list(type = "noul"))),
          jev_eval("s", list(q = jev_noul_q("x")))$q))))
-expect("a vector answer value is coerced to a scalar, not recycled",
-       identical(jvalue(withr_options(
-         Rjif.transport = transport_with_answers(list(q = list(type = "noul",
-                                                              noul = list(0.4, 0.9)))),
-         jev_eval("s", list(q = jev_noul_q("x")))$q)), 0.4))
+expect("a multi-element answer vector violates the scalar contract -> NA, not truncation (audit B1)",
+       { av <- withr_options(
+           Rjif.transport = transport_with_answers(list(q = list(type = "noul",
+                                                                  noul = list(0.4, 0.9)))),
+           suppressWarnings(jev_eval("s", list(q = jev_noul_q("x")))$q))
+         is.na(jvalue(av)) && grepl("not a single", av$contract %||% "", fixed = TRUE) })
 expect("a non-numeric noul value becomes NA",
        is.na(jvalue(withr_options(
          Rjif.transport = transport_with_answers(list(q = list(type = "noul",
