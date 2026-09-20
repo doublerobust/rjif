@@ -102,6 +102,28 @@ check("F4 structured states and noul criteria survive shorthand on wire", {
   isTRUE(a) && identical(sent$state, state) && identical(sent$questions$q$criteria, criteria) &&
     identical(sent$questions$q$type, "noul")
 })
+check("F4 named character noul criteria serialize as an object", {
+  sent <- NULL
+  tr <- function(b) { sent <<- jsonlite::fromJSON(jsonlite::toJSON(b, auto_unbox = TRUE), simplifyVector = FALSE); noul(0.8)(b) }
+  a <- withr_options(Rjif.transport = tr, jif("s", "q", c(true = "present", false = "absent")))
+  isTRUE(a) && identical(sent$questions$q$criteria, list(true = "present", false = "absent"))
+})
+check("F4 distribution and weighted-mean tolerance boundaries", {
+  a <- suppressWarnings(withr_options(Rjif.transport = forge(list(choice = "a", confidence = 1,
+    probabilities = list(a = 0.5, b = 0.49))), jif("s", qc)))
+  b <- suppressWarnings(withr_options(Rjif.transport = forge(list(score = 0.55, confidence = 1,
+    probabilities = list("0" = 0.5, "1" = 0.5), legend = list("0" = "low", "1" = "high"))), jif("s", qs)))
+  !jif_abstained(a) && !jif_abstained(b)
+})
+check("F5 all computed backoffs obey max_wait", {
+  .pick(".backoff_wait")(2, 10, 30, NULL, max_wait = 0.1) == 0.1
+})
+check("F5 HTTP-date Retry-After obeys server hint and cap", {
+  old <- Sys.getlocale("LC_TIME"); on.exit(Sys.setlocale("LC_TIME", old))
+  Sys.setlocale("LC_TIME", "C")
+  future <- format(Sys.time() + 60, "%a, %d %b %Y %H:%M:%S GMT", tz = "GMT")
+  .pick(".backoff_wait")(1, 0.01, 0.02, future, max_wait = 2) == 2
+})
 check("F5 helper actually executes", {
   f <- .pick(".backoff_wait")
   w <- vapply(1:8, function(k) f(k, 1, 30, NULL), numeric(1))

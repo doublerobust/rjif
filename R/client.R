@@ -387,7 +387,7 @@ jev_answer_valid <- function(ans, q) {
       return(invalid("probability names do not cover the offered options"))
     }
     s <- sum(vals)
-    if (abs(s - 1) > JEV_PROB_SUM_TOL) {
+    if (abs(s - 1) > JEV_PROB_SUM_TOL + 1e-9) {
       return(invalid(paste0("probabilities sum to ", formatC(s, format = "f",
                                                              digits = 3), ", not ~1")))
     }
@@ -449,7 +449,7 @@ jev_answer_valid <- function(ans, q) {
     return(invalid("score probability vector malformed (names, NA, or range)"))
   }
   s <- sum(vals)
-  if (abs(s - 1) > JEV_PROB_SUM_TOL) {
+  if (abs(s - 1) > JEV_PROB_SUM_TOL + 1e-9) {
     return(invalid(paste0("score probabilities sum to ", formatC(s, format = "f",
                                                                  digits = 3),
                           ", not ~1")))
@@ -476,7 +476,7 @@ jev_answer_valid <- function(ans, q) {
   # weighted mean of the rounded ones lands within ~0.015; the docs' own
   # example 0/0.95/0.05 -> 1.05 is exact).
   wm <- sum(vals * as.integer(pn))
-  if (abs(wm - v) > JEV_WEIGHT_TOL) {
+  if (abs(wm - v) > JEV_WEIGHT_TOL + 1e-9) {
     return(invalid(paste0("score ", formatC(v, format = "f", digits = 3),
                           " contradicts its probability-weighted mean ",
                           formatC(wm, format = "f", digits = 3))))
@@ -645,6 +645,8 @@ jev_noul_q <- function(instructions, criteria = NULL) {
     if (anyDuplicated(cn)) {
       stop("Rjif: noul criteria must not repeat 'true'/'false'.", call. = FALSE)
     }
+    # Named atomic vectors otherwise serialize as arrays, losing true/false.
+    criteria <- as.list(criteria)
   }
   structure(list(type = "noul", instructions = instructions,
                  criteria = criteria), class = "jev_question")
