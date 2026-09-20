@@ -42,8 +42,14 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     changes nothing the caller observes.}
 
   \item{cache}{\code{NULL} (default) or a path string. Results are saved after
-    each completed chunk and reused only when the full question (including
-    criteria), requested model, row count, threshold, and floor match.
+    each completed chunk and reused only when the run identity matches: the
+    full question (including criteria), requested model, row count,
+    threshold, floor, and an MD5 digest of the state vector's contents and
+    order. A mismatch REFUSES the call with an error: zero new requests are
+    made and the existing cache file is left byte-intact (external audit r2
+    finding 2 -- warn-and-overwrite used to destroy the only prior artifact
+    and silently re-bill the whole run; start over by passing a fresh path).
+    The same refusal applies to a cache file that cannot be read as an RDS.
     Completed rows make no new calls, including policy abstentions. Failed
     requests and invalid answers rerun by default; set
     \code{options(Rjif.cache_rerun_errors = FALSE)} to keep failures too.
@@ -51,10 +57,12 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     lose the current chunk, not earlier saved chunks. Writes use a temporary
     file in the same directory, then rename it over the cache. Failed writes
     warn and leave the previous cache intact. Use one writer per cache path.
-    States are matched by position, not content: do not change or reorder
-    them while reusing a cache. The file contains question text, criteria,
-    run settings, and results in row order. States are not stored, but this
-    can still disclose your data: protect the file accordingly.}
+    Result rows are matched by position; the digest detects that the vector
+    changed but cannot say which row moved. The file contains question text,
+    criteria, run settings, and results in row order. Plaintext states are
+    not stored (only their digest), but this can still disclose your data:
+    protect the file accordingly. The digest is an accident detector, not a
+    security hash or de-identification.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
     \code{"jev-latest"}.}
