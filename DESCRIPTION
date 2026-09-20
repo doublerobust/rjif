@@ -1,6 +1,6 @@
 Package: Rjif
 Title: The 'Jif' Statement: Judgment-Based Control Flow via TypeSafe Jev
-Version: 0.0.1
+Version: 0.1.0
 Authors@R: person("Yue", "Shentu", role = c("aut", "cre"), email = "n43368410@gmail.com")
 Description: Replaces hard-coded 'if' conditions with calibrated semantic
     decisions. Wraps the TypeSafe Jev 'System One' API (Choice, Score and Noul

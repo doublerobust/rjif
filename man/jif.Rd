@@ -87,10 +87,15 @@ jif_reason(x)
   evaluation and only the winning element runs, so side effects (issuing a
   label, paging someone) in losing branches never fire. An arm supplied as a
   pre-built variable was already evaluated by the caller and is routed by
-  value. Any other arm expression (for example \code{setNames(...)}) is
-  forced when its labels are inspected, with the same side-effect caveat the
-  old code had: write branch arms as literal \code{list()}/\code{c()} calls,
-  or build them into a variable first, to keep routing lazy.
+  value. When one arm is a literal map and the other a pre-built map, each is
+  consulted in its supported representation, YES before NO: a tag present in
+  the yes side wins over the same tag in the no side, and a match in either
+  representation decides (external audit r2 finding 1 fixed a regression that
+  consulted only literal tags first and misrouted mixed maps to
+  \code{unknown}). Any other arm expression (for example \code{setNames(...)})
+  is forced when its labels are inspected, with the same side-effect caveat
+  the old code had: write branch arms as literal \code{list()}/\code{c()}
+  calls, or build them into a variable first, to keep routing lazy.
 
   \code{jif_abstained()} returns a single logical; TRUE also covers a bare
   \code{NA}. \code{jif_reason()} returns the abstention reason string, or
