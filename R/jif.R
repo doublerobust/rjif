@@ -234,12 +234,19 @@ jev_score_many <- function(state_vec, question, ...,
   batch <- suppressWarnings(as.integer(batch))
   if (length(batch) != 1L || is.na(batch) || batch < 1L) batch <- 16L
 
-  # Cache identity includes the full question, requested model, row count,
-  # and decision policy. States are positional and are deliberately not stored.
-  # Keep the input vector unchanged when reusing a cache path.
+# Cache identity (external audit r2 finding 2): full question, requested
+# model, row count, decision policy, AND an order-sensitive digest of the
+  # model, row count, decision policy, AND an order-sensitive digest of the
+  # state CONTENT. Without the digest, re-sorting or editing the extract
+  # between passes silently re-attached old judgments to the wrong records
+  # (Codex fixture: c("present","absent") cached 0.99/0.01, then
+  # c("absent","present") replayed 0.99/0.01 with zero new calls). The digest
+  # stores no plaintext states. Not a security hash: it detects accidental
+  # reorders and changed extracts, it is not tamper-proof.
   cache_resumed <- 0L
-  cache_fingerprint <- serialize(list(version = 2L, question = unclass(q),
-    model = model, n = n, threshold = threshold, floor = confidence_floor),
+  cache_fingerprint <- serialize(list(version = 3L, question = unclass(q),
+    model = model, n = n, threshold = threshold, floor = confidence_floor,
+    states = .state_digest(state_vec)),
     NULL, version = 2)
   dec <- rep(NA, n); ps <- rep(NA_real_, n); cf <- rep(NA_real_, n)
   chosen <- rep(NA_character_, n); abst <- rep(NA, n); errs <- rep("", n)
@@ -252,10 +259,13 @@ jev_score_many <- function(state_vec, question, ...,
     }
     if (file.exists(cache)) {
       prev <- tryCatch(readRDS(cache), error = function(e) {
-        warning("Rjif: cache file '", cache, "' could not be read as an RDS ",
-                "(", .clean_error_text(conditionMessage(e), 120L),
-                "); starting fresh.", call. = FALSE)
-        NULL
+        # The file exists but is not a readable RDS. It may not be a cache at
+        # all; refusing beats silently overwriting the caller's bytes.
+        stop("Rjif: cache file '", cache, "' exists but could not be read as ",
+             "an RDS (", .clean_error_text(conditionMessage(e), 120L),
+             "). Nothing was written to it: point 'cache' at a different path, ",
+             "or delete/rename the file if you meant to start over.",
+             call. = FALSE)
       })
       if (.cache_valid(prev, n, cache_fingerprint)) {
         dec <- prev$decision; chosen <- prev$option; ps <- prev$p
@@ -265,9 +275,16 @@ jev_score_many <- function(state_vec, question, ...,
         filled <- !is.na(abst) & (if (rerun_err) !failed else TRUE)
         cache_resumed <- sum(filled)
       } else if (!is.null(prev)) {
-        warning("Rjif: cache file '", cache, "' exists but does not match this ",
-                "run (row count, frame shape, question, model, or decision policy); ",
-                "starting fresh and will overwrite it.", call. = FALSE)
+        # REFUSE rather than overwrite (external audit r2 finding 2): a
+        # mismatched cache is the only prior artifact of a run that may have
+        # cost money; silently replacing it (the old behavior) threw it away
+        # AND re-billed everything. Stop and let the caller decide.
+        stop("Rjif: cache file '", cache, "' exists but does not match this ",
+             "run (state contents/order, row count, frame shape, question, ",
+             "model, or decision policy). Its previous results are NOT reused ",
+             "and its file is NOT overwritten: point 'cache' at a new path for ",
+             "this run, or delete/rename the old file if you meant to start ",
+             "over.", call. = FALSE)
       }
     }
   }
@@ -358,6 +375,36 @@ jev_score_many <- function(state_vec, question, ...,
 # Failure to write (disk full, read-only path, permissions) is a warning, not
 # an error: a cache is an optimization and must never lose the run's answers
 # that are already in memory.
+# Content digest of the state vector for cache identity (external audit r2
+# finding 2). Built on openssl::md5 -- NOT as a security hash (nothing here
+# is tamper-proof), but as a whole-content checksum: an accidental reorder, a
+# corrected narrative, a re-sorted extract, or an edit anywhere in the text
+# changes it. (A hand-rolled prefix hash was the first attempt and a
+# stopifnot in its own unit check caught the gap: a same-length edit beyond
+# the 4 KB prefix digest invisible. md5 has no length cap.) States are joined
+# with an injected NULL byte separator (0x00, illegal in the UTF-8 states the
+# API accepts) plus each state's byte length, so c("a","b") and c("ab") and a
+# reordered vector all digest differently. NA and empty string get distinct
+# length markers. plaintext states are never stored -- the fingerprint holds
+# only the 16-byte digest. openssl is a transitive dependency of httr (which
+# Rjif already imports), so this adds no new install requirement.
+.state_digest <- function(state_vec) {
+  if (!requireNamespace("openssl", quietly = TRUE)) {
+    stop("Rjif: the cache feature needs the 'openssl' package (a dependency ",
+         "of 'httr', which Rjif already uses; its absence here means a broken ",
+         "library).", call. = FALSE)
+  }
+  raws <- lapply(state_vec, function(s) if (is.na(s)) raw(0) else charToRaw(s))
+  sep <- as.raw(0L)
+  payload <- unlist(lapply(seq_along(raws), function(i) {
+    c(raws[[i]], sep,
+      charToRaw(if (is.na(state_vec[[i]])) "N" else format(length(raws[[i]]), scientific = FALSE)),
+      sep)
+  }), use.names = FALSE)
+  d <- openssl::md5(payload)
+  list(digest = paste(format(d), collapse = ""), n = length(state_vec))
+}
+
 .cache_valid <- function(df, n, fingerprint) {
   cols <- c("decision", "option", "p", "confidence", "abstained", "error")
   if (!is.data.frame(df) || nrow(df) != n || !identical(names(df), cols) ||

@@ -141,7 +141,7 @@ check("F5 resume costs zero transport calls", local({
   })
 }))
 for (change in c("question", "long-question", "criteria", "model", "rowcount", "threshold", "floor")) {
-  check(paste("F5 rejects stale cache", change), local({
+  check(paste("F5 refuses stale cache", change), local({
     cache <- tempfile(); on.exit(unlink(cache)); calls <- 0L
     tr <- function(b) { calls <<- calls + 1L; noul(0.9)(b) }
     q <- jev_noul_q(paste(rep("x", 220), collapse = ""))
@@ -155,12 +155,28 @@ for (change in c("question", "long-question", "criteria", "model", "rowcount", "
       if (change == "rowcount") args$state_vec <- "a"
       if (change == "threshold") args$threshold <- 0.95
       if (change == "floor") args$confidence_floor <- 0.99
-      before <- calls; out <- warned(do.call(jev_score_many, args))
-      calls - before == length(args$state_vec) && attr(out$value, "n_resumed") == 0 &&
-        any(grepl("does not match", out$warnings))
+      # r2 finding 2: a mismatched cache now REFUSES (error, zero new calls,
+      # the prior file left intact) instead of warn-and-overwrite. The old
+      # path billed a full re-run and destroyed the only prior artifact.
+      before <- calls
+      e <- error_text(do.call(jev_score_many, args))
+      calls == before && grepl("does not match", e, fixed = TRUE) &&
+        grepl("NOT overwritten", e, fixed = TRUE) &&
+        !is.null(tryCatch(readRDS(cache), error = function(x) NULL))
     })
   }))
 }
+check("F5 corrupt/unreadable cache file refuses without touching bytes", local({
+  cache <- tempfile(); on.exit(unlink(cache)); calls <- 0L
+  tr <- function(b) { calls <<- calls + 1L; noul(0.9)(b) }
+  writeBin(charToRaw("NOT_AN_RDS_0123456789"), cache)
+  before_md5 <- openssl::md5(charToRaw(paste(readBin(cache, "raw", 1e6), collapse = ",")))
+  e <- withr_options(Rjif.transport = tr, error_text(
+    jev_score_many(c("a", "b"), "q", cache = cache)))
+  after_md5 <- openssl::md5(charToRaw(paste(readBin(cache, "raw", 1e6), collapse = ",")))
+  grepl("could not be read as", e, fixed = TRUE) && calls == 0L &&
+    identical(before_md5, after_md5)
+}))
 check("F5 error retries clear stale diagnostics; third pass free", local({
   cache <- tempfile(); on.exit(unlink(cache)); calls <- 0L
   tr <- function(b) { calls <<- calls + 1L; if (calls == 1L) stop("transient"); noul(0.9)(b) }

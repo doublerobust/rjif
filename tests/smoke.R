@@ -1386,7 +1386,7 @@ expect("f5: cache round-trips a full score_many frame byte-equivalently",
            invisible(b); jev_usage()$calls - n0 })
          identical(b[1:6], a[1:6]) && identical(attr(b, "n_resumed"), 3L)
        }))
-expect("f5: a cache built for another question fingerprint is ignored loudly",
+expect("f5: a cache built for another question fingerprint is REFUSED (r2 finding 2)",
        local({
          cf <- tempfile(fileext = ".rds")
          on.exit(unlink(cf))
@@ -1394,9 +1394,38 @@ expect("f5: a cache built for another question fingerprint is ignored loudly",
            answers = list(q = list(type = "noul", noul = 0.8)))
          invisible(withr_options(Rjif.transport = tr1,
            jev_score_many(c("s1", "s2"), "question A", cache = cf)))
-         w <- warn_msg(withr_options(Rjif.transport = tr1,
+         # Codex r2 finding 2: the old path warned and OVERWROTE the only prior
+         # artifact (and re-billed everything). Mismatch now stops.
+         e <- err_msg(withr_options(Rjif.transport = tr1,
            jev_score_many(c("s1", "s2"), "question B", cache = cf)))
-         grepl("does not match", w, fixed = TRUE)
+         grepl("does not match", e, fixed = TRUE) &&
+           grepl("NOT overwritten", e, fixed = TRUE)
+       }))
+expect("f5: cache digest binds to state CONTENT and order (r2 finding 2)",
+       local({
+         cf <- tempfile(fileext = ".rds")
+         on.exit(unlink(cf))
+         # state-sensitive fixture exactly like Codex's: present -> .99, absent -> .01
+         sttr <- function(body) list(model = "f", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul",
+                                   noul = if (identical(body$state, "present")) 0.99 else 0.01)))
+         n <- 0L
+         cnt <- function(body) { n <<- n + 1L; sttr(body) }
+         withr_options(Rjif.transport = cnt, {
+           r1 <- jev_score_many(c("present", "absent"), "Q?", cache = cf)
+           n1 <- n
+           # SAME content, reordered: must NOT silently replay stale judgments
+           e <- err_msg(jev_score_many(c("absent", "present"), "Q?", cache = cf))
+           same_calls <- n == n1
+           # identical vector again: replays for free
+           r2 <- jev_score_many(c("present", "absent"), "Q?", cache = cf)
+           # one corrected character: refused again
+           e2 <- err_msg(jev_score_many(c("present", "absentt"), "Q?", cache = cf))
+           all(unlist(r1$p) == c(0.99, 0.01)) &&
+             grepl("does not match", e, fixed = TRUE) && same_calls &&
+             identical(attr(r2, "n_resumed"), 2L) && n == n1 &&
+             grepl("does not match", e2, fixed = TRUE)
+         })
        }))
 expect("f5: cache rows that previously ERRORED are re-run by default",
        local({
