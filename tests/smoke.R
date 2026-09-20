@@ -1492,6 +1492,128 @@ expect("f5: cache rows that previously ERRORED are re-run by default",
            isTRUE(b$decision[[1]]) && identical(attr(b, "n_resumed"), 0L)
        }))
 
+# --- r3 finding R3-1: encoding-blind cache identity ------------------------
+# R strings carry per-element encoding flags: identical stored BYTES can be
+# different text (bytes c3 a9 flagged UTF-8 = e-acute; the same bytes flagged
+# latin1 = A-tilde + copyright), and charToRaw() cannot see the flag. The v3
+# digest therefore keyed two DIFFERENT payloads to one identity while
+# toJSON() sent different JSON for each (audit probe: a latin1 run silently
+# resumed the UTF-8 decision with zero new calls). Fix: canonicalise
+# state_vec with enc2utf8() before both the digest and serialisation, reject
+# invalid byte sequences up front, bump the fingerprint to version 4.
+expect("r3-1: same bytes / different Unicode meaning are DISTINGUISHED (refusal, no false resume, cache bytes intact)",
+       local({
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         u <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(u) <- "UTF-8"
+         l <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(l) <- "latin1"
+         stopifnot(!identical(enc2utf8(u), enc2utf8(l)))
+         calls <- 0L
+         # state-sensitive fixture like the audit's: UTF-8 e-acute -> .99,
+         # the latin1 two-character string -> .01
+         tr <- function(body) {
+           calls <<- calls + 1L
+           p <- if (identical(body$state, enc2utf8(u))) 0.99 else 0.01
+           list(model = "f", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = p)))
+         }
+         a <- withr_options(Rjif.transport = tr, jev_score_many(u, "x", cache = cf))
+         before <- tools::md5sum(cf)
+         e <- tryCatch({ withr_options(Rjif.transport = tr,
+                        jev_score_many(l, "x", cache = cf)); "" },
+                       error = conditionMessage)
+         fresh <- withr_options(Rjif.transport = tr, jev_score_many(l, "x"))
+         isTRUE(a$decision[[1]]) &&
+           grepl("does not match", e, fixed = TRUE) &&
+           identical(as.integer(calls), 2L) &&          # run1 + fresh run3; refusal makes no call
+           identical(before, tools::md5sum(cf)) &&      # refusal left bytes intact
+           identical(fresh$decision[[1]], FALSE)        # latin1 text scores on its own
+       }))
+expect("r3-1: same text / different declared encodings UNIFY across a resume",
+       local({
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         u <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(u) <- "UTF-8"  # "e-acute"
+         m <- rawToChar(as.raw(0xe9));          Encoding(m) <- "latin1" # same char
+         stopifnot(identical(enc2utf8(u), enc2utf8(m)))
+         tr <- function(body) list(model = "f", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul", noul = 0.8)))
+         invisible(withr_options(Rjif.transport = tr, jev_score_many(u, "x", cache = cf)))
+         n0 <- jev_usage()$calls
+         b <- withr_options(Rjif.transport = tr, jev_score_many(m, "x", cache = cf))
+         (jev_usage()$calls - n0) == 0L && identical(attr(b, "n_resumed"), 1L)
+       }))
+expect("r3-1: invalid byte sequences are rejected before any call",
+       local({
+         bad <- rawToChar(as.raw(c(0xed, 0xa0, 0x80)))  # surrogate half as raw
+         Encoding(bad) <- "UTF-8"
+         stopifnot(!validEnc(bad))
+         reached <- FALSE
+         tr <- function(body) { reached <<- TRUE; stop("must not be reached") }
+         e <- tryCatch({ withr_options(Rjif.transport = tr,
+                        jev_score_many(c("ok", bad), "x")); "" },
+                       error = conditionMessage)
+         grepl("invalid byte sequences", e, fixed = TRUE) && !reached
+       }))
+expect("r4-1: 'bytes'-marked states are rejected before digest, cache, or transport (both valid-looking and invalid bytes)",
+       local({
+         b <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(b) <- "bytes"
+         stopifnot(validEnc(b), Encoding(b) == "bytes")  # the bypass premises
+         badb <- rawToChar(as.raw(c(0xed, 0xa0, 0x80))); Encoding(badb) <- "bytes"
+         reached <- 0L
+         tr <- function(body) { reached <<- reached + 1L
+           list(model = "f", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         # seed a cache with the UTF-8 interpretation (explicitly marked, not
+         # locale-default), then try to resume with the bytes-marked string:
+         # must error, zero new calls, cache bytes intact
+         u8 <- local({s <- rawToChar(as.raw(c(0xc3,0xa9))); Encoding(s) <- "UTF-8"; s})
+         seeded <- withr_options(Rjif.transport = tr, jev_score_many(u8, "x", cache = cf))
+         calls0 <- reached; md5a <- tools::md5sum(cf)
+         e1 <- tryCatch({ withr_options(Rjif.transport = tr,
+                        jev_score_many(b, "x", cache = cf)); "" }, error = conditionMessage)
+         e2 <- tryCatch({ withr_options(Rjif.transport = tr,
+                        jev_score_many(c("ok", badb), "x")); "" }, error = conditionMessage)
+         grepl("'bytes'-marked", e1, fixed = TRUE) &&
+           grepl("'bytes'-marked", e2, fixed = TRUE) &&
+           identical(as.integer(reached), as.integer(calls0)) &&
+           identical(md5a, tools::md5sum(cf)) &&
+           identical(as.integer(attr(seeded, "n_resumed")), 0L)  # seed run; the resume attempt must never produce a decision at all
+       }))
+expect("r3-1: a version-3 cache identity is never trusted by version-4 code (forged on-disk; positive control resumes at 4L)",
+       local({
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         calls <- 0L
+         tr <- function(body) { calls <<- calls + 1L
+           list(model = "f", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.8))) }
+         invisible(withr_options(Rjif.transport = tr,
+                        jev_score_many("s", "x", cache = cf)))
+         stopifnot(calls == 1L)
+         # Forge from the ON-DISK frame (complete, with row_failed), changing
+         # ONLY the fingerprint version 4L -> 3L (round 4, R4-2: forging from
+         # the returned frame produced an always-invalid cache that passed
+         # vacuously even on old code). For ASCII input this is byte-
+         # compatible with a real v3 identity except the version tag.
+         disk <- readRDS(cf)
+         fp <- unserialize(attr(disk, "cache_fingerprint"))
+         stopifnot(identical(fp$version, 4L))
+         fp$version <- 3L
+         old <- disk; attr(old, "cache_fingerprint") <- serialize(fp, NULL, version = 2)
+         saveRDS(old, cf); md5a <- tools::md5sum(cf)
+         e <- tryCatch({ withr_options(Rjif.transport = tr,
+                        jev_score_many("s", "x", cache = cf)); "" },
+                       error = conditionMessage)
+         refused <- grepl("does not match", e, fixed = TRUE) &&
+           calls == 1L && identical(md5a, tools::md5sum(cf))
+         # positive control: the same frame restored to 4L must RESUME
+         # (isolates version rejection from any shape/identity error)
+         back <- disk; attr(back, "cache_fingerprint") <-
+           serialize(unserialize(attr(back, "cache_fingerprint")), NULL, version = 2)
+         saveRDS(back, cf)
+         r <- withr_options(Rjif.transport = tr, jev_score_many("s", "x", cache = cf))
+         refused && calls == 1L && identical(attr(r, "n_resumed"), 1L)
+       }))
+
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))

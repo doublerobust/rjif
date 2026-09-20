@@ -239,6 +239,30 @@ jev_score_many <- function(state_vec, question, ...,
     stop("Rjif: state_vec must be a character (or factor) vector.", call. = FALSE)
   }
   state_vec <- as.character(state_vec)
+  # Canonicalise to UTF-8 before BOTH the cache digest and request
+  # serialisation (external audit round 3, finding R3-1): R strings carry
+  # per-element encoding flags, so "é" marked UTF-8 and the same BYTES marked
+  # latin1 are different text that charToRaw() — and therefore an
+  # encoding-blind digest — cannot tell apart, while toJSON() sends them as
+  # different payloads. One representation for hash and wire removes the
+  # mismatch; it also unifies the same text arriving under different declared
+  # encodings, which is the desirable direction for resume identity.
+  # Invalid byte sequences and "bytes"-marked strings are rejected up front
+  # rather than hashed. Note validEnc() is TRUE for Encoding == "bytes" and
+  # enc2utf8() preserves that flag without converting it (round 4, R4-1): a
+  # bytes-marked state can never be serialised by the JSON transport, so it
+  # must not obtain a successful decision through a cache hit either.
+  bad <- vapply(state_vec, function(s) {
+    !is.na(s) && (Encoding(s) == "bytes" || !validEnc(s))
+  }, logical(1))
+  if (any(bad)) {
+    stop("Rjif: state_vec elements ",
+         paste(which(bad), collapse = ", "),
+         " are 'bytes'-marked or contain invalid byte sequences; re-encode ",
+         "the input (e.g. stringi::str_conv or iconv) before scoring.",
+         call. = FALSE)
+  }
+  state_vec <- enc2utf8(state_vec)
   n <- length(state_vec)
   batch <- suppressWarnings(as.integer(batch))
   if (length(batch) != 1L || is.na(batch) || batch < 1L) batch <- 16L
@@ -252,7 +276,7 @@ jev_score_many <- function(state_vec, question, ...,
   # stores no plaintext states. Not a security hash: it detects accidental
   # reorders and changed extracts, it is not tamper-proof.
   cache_resumed <- 0L
-  cache_fingerprint <- serialize(list(version = 3L, question = unclass(q),
+  cache_fingerprint <- serialize(list(version = 4L, question = unclass(q),
     model = model, n = n, threshold = threshold, floor = confidence_floor,
     states = .state_digest(state_vec)),
     NULL, version = 2)

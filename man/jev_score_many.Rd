@@ -45,7 +45,11 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     each completed chunk and reused only when the run identity matches: the
     full question (including criteria), requested model, row count,
     threshold, floor, and an MD5 digest of the state vector's contents and
-    order. A mismatch REFUSES the call with an error: zero new requests are
+    order (states are normalised to UTF-8 first, so the same text arriving
+    under different declared encodings resumes as one identity, while
+    different text can no longer share an identity through identical raw
+    bytes; elements marked "bytes" and byte sequences invalid for any
+    encoding are rejected before any digest, cache lookup, or API call). A mismatch REFUSES the call with an error: zero new requests are
     made and the existing cache file is left byte-intact (external audit r2
     finding 2 -- warn-and-overwrite used to destroy the only prior artifact
     and silently re-bill the whole run; start over by passing a fresh path).

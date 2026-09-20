@@ -17,8 +17,19 @@ promises the 0.0.1 docs already made.
   reversal; 40 live calls (12 tie-forced with duplicated criteria) showed
   zero reversals. Effect: answers the old validator forwarded as decisions
   now abstain.
-- `jev_score_many(cache = ...)` fingerprint is now version 3 and includes an
-  MD5 digest of the full state vector (contents AND order). Consequences:
+- `jev_score_many(cache = ...)` fingerprint is now version 4: an MD5 digest
+  of the full state vector (contents AND order), computed after normalising
+  every state to UTF-8 (round 3 finding R3-1: with the v3 digest, bytes that
+  meant different characters under different declared encodings shared one
+  cache identity while the JSON payload differed, so a latin1-marked import
+  silently resumed the UTF-8-marked run's decisions with zero new calls).
+  Same text under different declared encodings now resumes as one identity;
+  different text can no longer collide through identical raw bytes; elements
+  explicitly marked "bytes" (validEnc() is TRUE for them but the JSON
+  transport cannot serialise them, so a cache hit must not fabricate a
+  decision) and byte sequences invalid in any encoding are rejected before
+  any digest, cache lookup, or API call.
+  Consequences:
   (a) a cache written by 0.0.1 no longer matches and is REFUSED; (b) a
   mismatched cache is no longer warn-and-overwrite: the call errors, makes
   zero requests, and leaves the prior file byte-intact, because silently

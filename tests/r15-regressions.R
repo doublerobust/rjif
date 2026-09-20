@@ -71,7 +71,7 @@ check("cache refusals preserve exact bytes and make zero calls", local({
         identical(md5, tools::md5sum(path))
     }, logical(1)))
     fp <- unserialize(attr(original, "cache_fingerprint"))
-    stopifnot(fp$version == 3L)
+    stopifnot(fp$version == 4L)   # v4: UTF-8-canonicalised state digest (round 3, R3-1)
     fp$version <- 2L; fp$states <- NULL
     old <- original; attr(old, "cache_fingerprint") <- serialize(fp, NULL, version = 2)
     for (bad in list(old, NULL, list(not = "a cache"), data.frame(x = 1))) {

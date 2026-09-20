@@ -2,13 +2,14 @@ Package: Rjif
 Title: The 'Jif' Statement: Judgment-Based Control Flow via TypeSafe Jev
 Version: 0.1.0
 Authors@R: person("Yue", "Shentu", role = c("aut", "cre"), email = "n43368410@gmail.com")
-Description: Replaces hard-coded 'if' conditions with calibrated semantic
-    decisions. Wraps the TypeSafe Jev 'System One' API (Choice, Score and Noul
-    primitives) and provides jif()/jmatch() control-flow verbs plus a
-    vectorized evaluator that scores whole vectors of narratives (for example
-    eCRF adverse-event text) one state per API call, with calibrated
-    confidence, explicit abstention sentinels and selection-failure analytics
-    for auditing reliability.
+Description: Replaces hard-coded 'if' conditions with semantic decisions
+    gated by explicit abstention. Wraps the TypeSafe Jev 'System One' API
+    (Choice, Score and Noul primitives) and provides jif()/jmatch()
+    control-flow verbs plus a vectorized evaluator that scores whole vectors
+    of narratives (for example eCRF adverse-event text) one state per API
+    call, with confidence floors, abstention sentinels and selection-failure
+    analytics for auditing reliability. Calibration is measured, not
+    asserted; see the reliability diagnostics.
 License: MIT + file LICENSE
 URL: https://github.com/doublerobust/rjif
 BugReports: https://github.com/doublerobust/rjif/issues
