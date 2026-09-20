@@ -522,27 +522,36 @@ jev_answer_valid <- function(ans, q) {
   base <- .positive_option("Rjif.retry_base", 1)
   cap <- .positive_option("Rjif.retry_cap", 30)
   max_wait <- .positive_option("Rjif.retry_max_wait", 120)
+  # Configuration/serialization failures are not transport failures. Validate
+  # once, outside the retry loop, so missing keys and invalid bodies never retry.
+  key <- jev_key()
+  payload <- jsonlite::toJSON(body, auto_unbox = TRUE, null = "null")
+  endpoint <- jev_endpoint()
   attempt <- 0L
   repeat {
     attempt <- attempt + 1L
     resp <- tryCatch(
-      httr::POST(jev_endpoint(),
-        httr::config(timeout = timeout),
-        httr::add_headers(Authorization = paste("Bearer", jev_key()),
+      httr::POST(endpoint,
+        httr::timeout(timeout),
+        httr::add_headers(Authorization = paste("Bearer", key),
                           `Content-Type` = "application/json"),
-        body = jsonlite::toJSON(body, auto_unbox = TRUE, null = "null"),
+        body = payload,
         encode = "raw"),
-      error = function(e) structure(list(msg = .clean_error_text(conditionMessage(e))),
-                                    class = "jev_transport_error"))
+      error = function(e) {
+        if (!inherits(e, "curl_error")) stop(e)
+        structure(list(msg = .clean_error_text(conditionMessage(e))),
+                  class = "jev_transport_error")
+      })
     if (inherits(resp, "jev_transport_error")) {
       # connection-level failure (timeout, DNS, refused, reset): retryable if
       # attempts remain; the message is already scrubbed of anything key-like.
       if (attempt <= max_retries) {
-        .retry_sleep(.backoff_wait(attempt, base, cap, NULL))
+        .retry_sleep(.backoff_wait(attempt, base, cap, NULL, max_wait))
         next
       }
-      stop("Rjif: API call to ", jev_endpoint(), " failed after ", attempt,
-           " attempt(s): ", resp$msg,
+      stop("Rjif: failed after ", attempt,
+           " attempt(s); the vendor may bill attempts even when no answer arrived. ",
+           "API call to ", endpoint, ": ", resp$msg,
            call. = FALSE)
     }
     status <- tryCatch(httr::status_code(resp), error = function(e) NA_integer_)
@@ -567,15 +576,15 @@ jev_answer_valid <- function(ans, q) {
     haltxt <- tryCatch(rawToChar(resp$content), error = function(e) "")
     if (!nzchar(haltxt)) haltxt <- tryCatch(httr::content(resp, "text", encoding = "UTF-8"),
                                            error = function(e) "")
-    stop("Rjif: API call to ", jev_endpoint(), " failed (HTTP ",
-         if (is.na(status)) "?" else status, ")",
-         if (attempt > 1L) paste0(" after ", attempt, " attempts") else "", ": ",
+    stop("Rjif: failed (HTTP ", if (is.na(status)) "?" else status,
+         ") after ", attempt, " attempt(s)",
+         if (identical(status, 429L) || identical(status, 529L))
+           "; retries exhausted; the vendor may bill attempts even when no answer arrived" else "",
+         if (identical(status, 401L) || identical(status, 403L))
+           "; check TYPESAFE_API_KEY" else "",
+         ". API call to ", endpoint, ": ",
          .clean_error_text(paste(haltxt, collapse = " ")),
-        if (identical(status, 401L) || identical(status, 403L))
-          " -- check TYPESAFE_API_KEY." else "",
-        if (identical(status, 429L) || identical(status, 529L))
-          " -- retries exhausted; the vendor may bill some attempts even when no answer arrived." else "",
-        call. = FALSE)
+         call. = FALSE)
   }
   txt <- tryCatch(rawToChar(resp$content), error = function(e) "")
   if (!nzchar(txt)) stop("Rjif: API returned an empty body (HTTP ", status, ").",
@@ -599,16 +608,16 @@ jev_answer_valid <- function(ans, q) {
     return(min(ra, max_wait))   # honour server hints inside the caller's budget
   }
   jitter <- computed * stats::runif(1, 0, 0.25)
-  min(cap, computed + jitter)
+  min(cap, max_wait, computed + jitter)
 }
 
 .retry_sleep <- function(seconds) {
-  Sys.sleep(max(0, min(seconds, 600)))  # absolute ceiling: never sleep 15min
+  Sys.sleep(max(0, seconds))
 }
 
 .positive_option <- function(name, default) {
   v <- suppressWarnings(as.numeric(getOption(name, default)))
-  if (length(v) != 1L || is.na(v) || v <= 0) default else v
+  if (length(v) != 1L || !is.finite(v) || v <= 0) default else v
 }
 .nonneg_int_option <- function(name, default) {
   v <- suppressWarnings(as.integer(getOption(name, default)))

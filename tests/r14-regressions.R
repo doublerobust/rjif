@@ -211,7 +211,7 @@ if (.Platform$OS.type != "windows" && requireNamespace("httpuv", quietly = TRUE)
     writeLines("ready", file.path(tmp, "ready"))
     repeat httpuv::service(50)
   }, silent = FALSE)
-  on.exit({ tools::pskill(child$pid); parallel::mccollect(child) }, add = TRUE)
+  on.exit({ tools::pskill(child$pid); suppressWarnings(parallel::mccollect(child)) }, add = TRUE)
   deadline <- Sys.time() + 10
   while (!file.exists(file.path(tmp, "ready")) && Sys.time() < deadline) Sys.sleep(0.02)
   base <- paste0("http://127.0.0.1:", port)
