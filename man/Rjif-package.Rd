@@ -26,6 +26,31 @@ the package scrubs what comes back out.) For offline work,
 layer with deterministic (statistically meaningless) test values.
 }
 \details{
+Transport and cache options (set with \code{options()}):
+\itemize{
+  \item \code{Rjif.timeout = 120}: hard per-request timeout in seconds;
+    fractional seconds are supported.
+  \item \code{Rjif.retries = 3L}: additional attempts after the first,
+    for HTTP 429/529 or curl transport errors only. Zero disables retries.
+  \item \code{Rjif.retry_base = 1}: initial exponential backoff in seconds.
+  \item \code{Rjif.retry_cap = 30}: cap on computed backoff including jitter.
+  \item \code{Rjif.retry_max_wait = 120}: ceiling on every sleep, including
+    a Retry-After header (delta-seconds or HTTP date).
+  \item \code{Rjif.cache_rerun_errors = TRUE}: rerun failed rows on resume.
+    FALSE retains failures too. Completed policy abstentions are always reused.
+}
+The computed wait is \code{min(cap, base * 2^(attempt - 1))} with up to
+25 percent jitter, capped again by cap and retry_max_wait. A nonnegative
+numeric Retry-After replaces that wait, capped by retry_max_wait. Invalid
+nonpositive or nonfinite timing options use their defaults. Retries must
+coerce to a nonnegative integer, otherwise the default is used.
+Timeout/retry options apply to the default HTTP transport; custom
+\code{Rjif.transport} functions manage their own timing and retries.
+HTTP 401/403/404/422 and other statuses outside 429/529 are not retried.
+Final HTTP/transport failures report attempt counts. Exhausted retryable
+failures warn that the vendor may have billed an attempt without delivering
+an answer. \code{\link{jev_usage}} counts decoded responses, not attempts.
+
 Typical flow:
 
 \enumerate{

@@ -1274,7 +1274,7 @@ expect("f4: choice answer contradicting its own argmax is rejected (probe 3)",
          { d <- suppressWarnings(withr_options(Rjif.transport = tr,
                jif("s", jev_choice_q("i", c(a = "1", b = "2")))))
            length(d) == 1L && is.na(d) } })
-expect("f4: a 0.01 winner gap inside rounding tolerance is still ACCEPTED",
+expect("f4: a 0.02 winner gap at the rounding boundary is still ACCEPTED",
        { tr <- function(body) list(answers = list(q = list(
            type = "choice", choice = "a", confidence = 0.5,
            probabilities = list(a = 0.49, b = 0.51))))
@@ -1366,8 +1366,8 @@ expect("f5: backoff is exponential, capped, and never negative",
 expect("f5: a sane Retry-After overrides computed backoff",
        backoff_wait(1, 1, 30, "7") == 7 &&
          backoff_wait(1, 1, 30, "9999", max_wait = 120) == 120 &&
-         # garbage Retry-After (date form, negative, NA) falls back to computed
-         backoff_wait(1, 1, 30, "Wed, 21 Oct 2026 07:28:00 GMT") >= 1 &&
+         # malformed/negative/NA headers fall back to computed backoff
+         backoff_wait(1, 1, 30, "not an HTTP date") >= 1 &&
          backoff_wait(1, 1, 30, "-5") >= 1 &&
          backoff_wait(1, 1, 30, NA_character_) >= 1)
 expect("f5: cache round-trips a full score_many frame byte-equivalently",

@@ -18,7 +18,8 @@ jif_reason(x)
   \item{state}{single non-NA string (the text or record to judge, for example
     an adverse-event narrative or a support ticket), or a non-empty
     \code{list} for structured states (records, nested fields, chat logs),
-    serialized to the API as a JSON object. The API takes one state per call;
+    serialized to the API as a JSON object or array, according to names.
+    The API takes one state per call;
     to score a vector of states use \code{\link{jev_score_many}}. A character
     vector is always an error.}
 
@@ -104,21 +105,25 @@ at. \code{j_ifelse()} branches on the result with an explicit
 \code{unknown} arm.
 }
 \details{
-Three ways \code{jif()} abstains, distinguished by \code{jif_reason()}:
+Abstention reasons reported by \code{jif_reason()}:
 
 \itemize{
-  \item \code{"no answer value from the API"}: Jev returned nothing usable
-    (a contract-violating answer, or a value the validator rejected). A
-    missing datum; not evidence of "false".
-  \item \code{"confidence unavailable with a floor set"}: a decision exists
-    but no probability backs it, and you required one.
+  \item \code{"no answer value from the API"}: no usable value remained
+    after contract validation. An omitted answer object is an error instead.
+  \item \code{"confidence unavailable with a floor set"}: a value exists
+    but no probability backs it, and a floor was required.
   \item \code{"probability 0.612 < confidence_floor 0.700"}: an answer
-    exists and fell below your floor. This is your policy, not the model's
-    uncertainty.
+    failed a one-sided floor (Choice or Score, for example).
+  \item \code{"probability 0.500 is in the uncertain middle of the two-sided confidence_floor 0.700 (negative cut 0.300)"}:
+    a Noul answer cleared neither cutoff.
+  \item \code{"confidence_floor is NA; refusing to decide"}: the caller
+    explicitly refused a decision with an NA floor.
 }
 
-The first two call for better state or a relaxed floor; the third is a
-threshold decision. Don't pool them in reporting.
+For a Noul floor at or below threshold, first require P(yes) >= floor, then
+compare P(yes) with threshold. FALSE remains reachable. If floor > threshold
+but floor < 0.5, the cutoffs overlap and TRUE takes precedence. A floor above
+0.5 gives a nonempty abstention window.
 }
 \examples{
 # offline demo through the mock transport (numbers are test hashes, not judgments)

@@ -37,21 +37,21 @@ adding one doesn't change the others.
 
 ## Uncertain answers are `NA`, not `FALSE`
 
-If the model gives no usable number, or the probability falls below the
-`confidence_floor` you set, `jif()` returns `NA` rather than guessing. A plain
-`if (jif(...))` then stops with an error. That's the design working: you don't
-want undecided rows sliding into the else branch. Use `j_ifelse()` and give the
-`unknown` arm somewhere to go.
+If the model gives no usable number, or the answer fails your confidence
+policy, `jif()` returns `NA`. A plain `if (jif(...))` then stops with an error.
+Use `j_ifelse()` and give the `unknown` arm somewhere to go.
 
-For a true/false (`jev_noul_q()`) question the floor is two-sided, because the
-raw probability is the evidence there and a confident NO deserves to win as
-easily as a confident YES. With `threshold = 0.5` and
+For a true/false (`jev_noul_q()`) question with a floor above the threshold,
+the floor is two-sided. With `threshold = 0.5` and
 `confidence_floor = 0.7`: `p >= 0.7` decides TRUE, `p <= 0.3` decides FALSE,
-in between abstains. A floor at or below the threshold stays one-sided (only
-TRUE needs to clear it; anything else abstains). For multiple-choice and score
-questions the floor is one-sided by design: there is no single "negative side"
-of a named-option pick, so `1 - p` has no decision meaning and the floor
-applies to the selected answer only.
+and values in between abstain. A floor at or below the threshold stays
+one-sided: first require `p >= floor`, then decide using `p >= threshold`.
+This can produce FALSE as well as TRUE: p = 0.4, floor = 0.4, threshold = 0.5
+returns FALSE. If the two-sided cutoffs overlap (floor below 0.5), TRUE takes
+precedence in the overlap. Prefer a floor above 0.5 for a nonempty abstention
+window. Choice and Score always use a one-sided floor on `jprob()`.
+An NA floor refuses every decision, with reason
+`"confidence_floor is NA; refusing to decide"`.
 
 `jif_reason()` says which case you're in:
 
@@ -94,14 +94,18 @@ Policy abstentions land in `error` too, so a resumed batch tells you why a
 row was never decided. For score rows the `option` column holds the position
 as text, e.g. `"1.050"`.
 
-For a long batch, pass `cache = "path.rds"`. After every chunk the results
-are written to that file; a later call with the same path, question, and row
-count reloads it and skips completed rows. Kill the process at row 3,000 of
-5,000 and you pay to restart at row 3,001, not row 1. Rows that failed on an
-earlier pass are re-run by default (set
-`options(Rjif.cache_rerun_errors = FALSE)` to keep the failure), the cache
-refuses to load when the question text, model, or row count changed under
-it, and `attr(df, "n_resumed")` tells you how many rows came back for free.
+For a long batch, pass `cache = "path.rds"`. Each completed chunk is saved;
+a later call skips those rows without new requests. If interrupted mid-chunk,
+that chunk may need to run again. Rows with failed requests or invalid answers
+rerun by default (`Rjif.cache_rerun_errors = TRUE`); set it to FALSE to retain
+failures. Completed policy abstentions are reused. The cache refuses changes
+to the full question and criteria, requested model, row count, threshold, or
+floor. `attr(df, "n_resumed")` counts reused rows.
+
+Keep the state vector unchanged and in the same order: cache rows are matched
+by position, not content. Use one writer per cache path. The file contains
+question text, criteria, run settings, and results in row order. It does not
+store states, but can still disclose your data; protect it accordingly.
 
 ## Checking calibration
 
@@ -119,8 +123,9 @@ selection_curve(df)     # as you raise the floor: what share of rows do you
 
 Know what they are. `ece()` is a point estimate using the classic equal-width
 bins (Naeini et al.; Guo et al. 2017). It is not an upper bound on the true
-error, and it is not the bias-corrected version (Nixon et al. 2019, arXiv
-1904.01685). It warns under 30 usable rows; under about 100 it's mostly bin
+error, the adaptive calibration error of Nixon et al. (2019, arXiv
+1904.01685), or the debiased estimator of Roelofs et al. (AISTATS 2022).
+It warns under 30 usable rows; under about 100 it's mostly bin
 noise. Quote `attr(rc, "n_used")` along with the number. Row accounting is
 exact: every dropped row lands in exactly one `n_dropped` bucket, and
 `n_used + sum(dropped) == nrow(df)`.
@@ -155,17 +160,22 @@ and this README can't answer it.
 Cost and latency grow with rows: `jev_score_many()` is one call per row, and
 the `batch` argument is an internal chunk size, not request batching.
 
-A hung socket shouldn't freeze a 5,000-row batch, so every request carries a
-hard timeout (`Rjif.timeout`, default 120s) and retries: 429/529 statuses
-and connection-level errors (timeout, DNS, refused) get `Rjif.retries`
-attempts (default 3), sleeping
-`min(cap, base * 2^(attempt-1))` seconds, with `Retry-After` honored when the
-API sends it. Tune with `Rjif.retry_base` (1s), `Rjif.retry_cap` (30s), and
-`Rjif.retry_max_wait` (120s, the ceiling on any single sleep). A non-retryable
-error (401, 403, 404, 422) stops on the first try; the message reports the
-attempt count and, for exhausted retries, that the vendor may have billed
-timed-out attempts. Retries never inflate the usage counters:
-`jev_usage()` counts decoded responses, so failed attempts count zero.
+The default HTTP transport has a hard per-request timeout (`Rjif.timeout`,
+120 seconds, including fractional values). HTTP 429/529 and curl connection
+errors get up to `Rjif.retries` additional attempts (default 3, so at most 4
+attempts). Other statuses, including 401/403/404/422, stop immediately.
+The computed backoff is `min(cap, base * 2^(attempt-1))` with up to 25%
+jitter, capped again by `Rjif.retry_cap`. Tune with `Rjif.retry_base` (1s),
+`Rjif.retry_cap` (30s), and `Rjif.retry_max_wait` (120s, the ceiling on every
+sleep). `Retry-After` (nonnegative seconds or an HTTP date) replaces the
+computed wait, up to that ceiling; malformed headers fall back to backoff. Custom
+transports manage their own deadlines and retries.
+
+Final HTTP/transport failures report the attempt count. Exhausted retryable
+failures also say that the vendor may have billed attempts without delivering
+an answer. `jev_usage()` counts decoded responses, so failed attempts add
+nothing to these counters; this is not a complete billing ledger.
+`Rjif.cache_rerun_errors` defaults to TRUE. See `?Rjif-package` for all options.
 
 `rjif_mock_transport()` is for testing with no key and no network. Its
 numbers are deterministic hashes, statistically meaningless, and the source

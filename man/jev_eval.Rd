@@ -23,9 +23,10 @@ jprob(ans)
 jconf(ans)
 }
 \arguments{
-  \item{state}{single non-NA string: the text or record to judge. The API
-    takes exactly one state per call; a vector is rejected with a pointer to
-    \code{\link{jev_score_many}}.}
+  \item{state}{single non-NA string or a non-empty list (structured records,
+    nested fields, or chat logs). Lists serialize as JSON objects or arrays
+    according to their names. The API takes one state per call; a character
+    vector is rejected with a pointer to \code{\link{jev_score_many}}.}
 
   \item{questions}{named list of question specs built with the
     \code{jev_*_q()} constructors. Names are for your code (answers come back
@@ -42,13 +43,12 @@ jconf(ans)
     description is allowed. For Score: a character vector of ordered level
     descriptions, lowest severity first, or a list of structured level
     objects (\code{list(what = "...", examples = list("...")}) with the same
-    fields on every level. Score needs at least two levels (one level is
-    accepted by the endpoint but auto-unboxes to a bare scalar string, which
-    is never what you want; eleven or more are out of contract). For Noul: a
-    named list of exactly \code{true} and \code{false} rubrics refining what
-    each answer means (\code{list(true = "explicitly reported by a
-    clinician", false = "mentioned only as ruled out")}); the vendor accepts
-    these and the shorthand \code{jif(state, "assertion")} still sends none.
+    fields on every level. Score takes 2 to 10 levels. For Noul: an optional
+    named list or character vector with \code{true}, \code{false}, or both,
+    refining what each answer means (\code{list(true = "explicitly reported
+    by a clinician", false = "mentioned only as ruled out")}). The shorthand
+    \code{jif(state, "assertion", list(true = "present", false = "absent"))}
+    passes these criteria through. Without criteria it sends none.
     Levels are labelled \code{"0"} to \code{k-1} in the response legend.
     Choice takes 2 to 255 options.}
 
@@ -85,6 +85,16 @@ does not degrade the others. The constructors define the three judgment
 types; the accessors read the three different numbers off an answer.
 }
 \details{
+Choice answers require a normalized distribution over the offered options
+and confidence in [0, 1]. The chosen option may trail the largest displayed
+probability by at most 0.02 (plus a 1e-9 floating-point guard).
+Score answers require confidence in [0, 1], probabilities and legend keys
+covering exactly \code{0} through \code{k-1}, and a score within 0.05 of the
+probability-weighted mean of the level indices. The distribution must sum to
+1 within 0.01. Both comparisons include a 1e-9 floating-point guard;
+accepted probabilities are normalized before the mean is
+computed. Bare \code{list(score = 1, confidence = 1)} answers are rejected.
+
 Do not confuse the accessors. \code{jconf()} summarizes how concentrated the
 probability distribution is (high confidence means the mass sits on one
 answer); it is not the probability that the answer is correct, and should not

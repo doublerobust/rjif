@@ -39,19 +39,17 @@ selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
     Values outside [0, 1] warn and then apply literally: a floor at or below
     0 keeps every usable row, a floor above 1 keeps none.}
 
-  \item{allow_type}{character vector of batch question types whose \code{p}
-    column you accept as the probability to calibrate. The estimators measure
-    EVENT-PROBABILITY calibration, and \code{p} means different things by
-    batch type: for a noul batch it is P(assertion true) (the right quantity,
-    never gated); for a choice batch it is the probability of the SELECTED
-    option; for a score batch it is the vendor confidence, i.e. how
-    concentrated the level distribution is, which is not a probability of any
-    event. A choice or score batch therefore ERRORS by default with an
-    explanation instead of silently producing a misleading curve; pass
-    \code{allow_type = "score"} (or \code{"choice"}) to compute it anyway,
-    which warns that the result is not calibration in the usual sense.
-    Hand-built data frames without a \code{question_type} attribute are your
-    contract and pass ungated.}
+  \item{allow_type}{character vector of batch types allowed to bypass the
+    probability-semantics check. All three functions expect event probabilities.
+    For Noul, \code{p} is P(assertion true) and passes without warning. For
+    Choice, it is P(selected option). For Score, it is distribution confidence
+    (concentration), not an event probability. Choice and Score therefore
+    error by default. Naming either in \code{allow_type} permits computation
+    with a warning. For selected-class Choice calibration, \code{truth} must
+    indicate whether the selected option was correct. A Score override still
+    measures concentration versus outcome, not event-probability calibration.
+    Hand-built data frames without a \code{question_type} attribute are the
+    caller's responsibility and pass without a type check.}
 }
 \value{
   \code{reliability_curve()} returns a data frame with one row per bin
@@ -107,10 +105,9 @@ properties to remember when quoting it:
     sampling: 30 observed events at p = 0.5 estimate ECE 0.5 against a truly
     calibrated source. These examples show direction, not a precision
     guarantee.
-  \item It is a different estimator from the debiased versions in the
-    literature (Nixon et al. 2019, arXiv:1904.01685; Roelofs et al., AISTATS
-    2022), which target and correct different biases. Know which one a
-    comparison is quoting.
+  \item It differs from the adaptive calibration error of Nixon et al.
+    (2019, arXiv:1904.01685) and the debiased estimator of Roelofs et al.
+    (AISTATS 2022). Know which estimator a comparison is quoting.
 }
 
 The drop filters are deliberately strict because a probability outside

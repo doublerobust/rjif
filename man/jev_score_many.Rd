@@ -23,8 +23,9 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     read as a Noul assertion.}
 
   \item{...}{for \code{jev_score_many()}: with the string shorthand, a named
-    list/vector of option descriptions makes it a Choice question (same rule
-    as \code{\link{jif}}).}
+    list/vector whose names are within \code{true}/\code{false} specifies
+    Noul criteria; other names make it a Choice question (same rule as
+    \code{\link{jif}}).}
 
   \item{threshold}{same meaning as in \code{\link{jif}}: a probability for
     Noul, a rubric level for Score, unused for Choice.}
@@ -40,20 +41,26 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     can lose (the cache is rewritten once per chunk); without a cache it
     changes nothing the caller observes.}
 
-  \item{cache}{\code{NULL} (default) or a path string. When set, results are
-    persisted to that file after every chunk and reloaded at the start of a
-    later call with the same path, question, and row count: an interrupted
-    bulk run resumes instead of re-billing completed rows. Rows whose earlier
-    attempt errored are re-run by default; set
-    \code{options(Rjif.cache_rerun_errors = FALSE)} to keep them cached. The
-    returned frame gains an \code{n_resumed} attribute. A cache file holds API
-    answers in row order (states are not stored) but can still disclose your
-    data: protect it accordingly.}
+  \item{cache}{\code{NULL} (default) or a path string. Results are saved after
+    each completed chunk and reused only when the full question (including
+    criteria), requested model, row count, threshold, and floor match.
+    Completed rows make no new calls, including policy abstentions. Failed
+    requests and invalid answers rerun by default; set
+    \code{options(Rjif.cache_rerun_errors = FALSE)} to keep failures too.
+    The returned frame gains an \code{n_resumed} attribute. An interrupt can
+    lose the current chunk, not earlier saved chunks. Writes use a temporary
+    file in the same directory, then rename it over the cache. Failed writes
+    warn and leave the previous cache intact. Use one writer per cache path.
+    States are matched by position, not content: do not change or reorder
+    them while reusing a cache. The file contains question text, criteria,
+    run settings, and results in row order. States are not stored, but this
+    can still disclose your data: protect the file accordingly.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
     \code{"jev-latest"}.}
 
-  \item{state}{single string for \code{jmatch()} to route.}
+  \item{state}{single non-NA string or non-empty structured list for
+    \code{jmatch()} to route.}
 
   \item{branches}{named list or character vector of branch descriptions
     (\code{key = "what this branch covers"}); passed as the criteria of a
