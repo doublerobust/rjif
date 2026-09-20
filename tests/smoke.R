@@ -261,17 +261,20 @@ expect("bin counts match the data (no row silently reassigned)",
 expect("mean_p is the in-bin mean; NA exactly where the bin is empty",
        isTRUE(all.equal(rc$mean_p[[1]], mean(df$p[df$p <= 0.5]))) &&
        identical(is.na(rc$mean_p), rc$n == 0L) &&
-       identical(is.na(rc$accuracy), rc$n == 0L))
+       identical(is.na(rc$observed_rate), rc$n == 0L))
 empty_bin <- reliability_curve(data.frame(p = c(0.9, 0.9), truth = c(TRUE, TRUE)),
                                n_bins = 2L)
-expect("an unoccupied bin is a kept row of n = 0 with NA mean_p/accuracy",
+expect("an unoccupied bin is a kept row of n = 0 with NA mean_p/observed_rate",
        identical(empty_bin$n, c(0L, 2L)) && is.na(empty_bin$mean_p[[1]]) &&
-       is.na(empty_bin$accuracy[[1]]) &&
+       is.na(empty_bin$observed_rate[[1]]) &&
        isTRUE(all.equal(empty_bin$mean_p[[2]], 0.9)))
 default_rc <- reliability_curve(df)
 expect("default n_bins gives 10 rows", identical(nrow(default_rc), 10L))
-expect("only occupied bins have numeric accuracy",
-       identical(!is.na(default_rc$accuracy), default_rc$n > 0L))
+expect("only occupied bins have numeric observed_rate",
+       identical(!is.na(default_rc$observed_rate), default_rc$n > 0L))
+expect("the old column name is GONE, not silently NULL-as-usual (breaking rename)",
+       { check <- reliability_curve(df); is.null(check$accuracy) &&
+         "accuracy" %in% names(check) == FALSE })
 expect("probabilities outside [0,1] are dropped and counted",
        { oo <- reliability_curve(data.frame(p = c(0.5, 1.4, -0.2, NA),
                                             truth = c(TRUE, TRUE, TRUE, TRUE)))
@@ -359,13 +362,13 @@ esc <- jmatch(ticket, list(refund_ok = "within return window and wants refund",
 expect("a floor nothing clears falls back", identical(esc, "FALLBACK"))
 expect("an escape-hatch winner routes to fallback even with no floor",
        identical(withr_options(Rjif.transport = transport_with_answers(
-         list(q = list(type = "choice", choice = "other",
+         list(q = list(type = "choice", choice = "other", confidence = 0.91,
                        probabilities = list(other = 0.91, referral = 0.09)))),
          jmatch("s", c(referral = "needs a referral", other = "other or unspecified"))),
          NA_character_))
 expect("abstain_options is customisable",
        identical(withr_options(Rjif.transport = transport_with_answers(
-         list(q = list(type = "choice", choice = "other",
+         list(q = list(type = "choice", choice = "other", confidence = 0.91,
                        probabilities = list(other = 0.91, referral = 0.09)))),
          jmatch("s", c(referral = "needs a referral", other = "other or unspecified"),
                 abstain_options = character(0))), "other"))
@@ -444,7 +447,8 @@ expect("an answer whose type disagrees with the question is caught",
          jev_eval("s", list(q = jev_noul_q("x")))$q)), fixed = TRUE))
 expect("probabilities arrive as a named numeric list",
        { pr <- withr_options(Rjif.transport = transport_with_answers(list(q = list(
-           type = "choice", choice = "a", probabilities = list(a = 0.6, b = 0.4)))),
+            type = "choice", choice = "a", confidence = 0.6,
+            probabilities = list(a = 0.6, b = 0.4)))),
            jev_eval("s", list(q = jev_choice_q("i", c(a = "x", b = "y"))))$q)$probs
          identical(names(pr), c("a", "b")) && identical(pr$a, 0.6) })
 expect("state must be a single non-NA string",
@@ -474,8 +478,12 @@ expect("score criteria may not be empty",
 expect("score criteria may not contain NA or blanks",
        grepl("empty or NA", err_msg(jev_score_q("i", c("none", NA))), fixed = TRUE))
 expect("named score criteria keep their label in the sent text",
-       identical(unclass(jev_score_q("i", c(none = "no symptoms")))$criteria,
-                 "none: no symptoms"))
+       # two levels: single-level rubrics are now refused before the wire
+       # (finding 4), so the label-prefix behavior is asserted at the minimum
+       # legal size
+       identical(unclass(jev_score_q("i", c(none = "no symptoms",
+                                            mild = "bothering but daily")))$criteria,
+                 c("none: no symptoms", "mild: bothering but daily")))
 expect("an unknown question type is refused, never silently TRUE",
        grepl("unknown question type", err_msg(jif("s",
          structure(list(type = "vibes", instructions = "x"), class = "jev_question"))),
@@ -789,9 +797,14 @@ expect("a NAMED 1-element object cannot impersonate a scalar wrapper (P36)",
            jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe"))))$q))
          is.na(jvalue(got)) && is.na(jprob(got)) && !is.na(got$contract) })
 expect("valid score confidence at the endpoints still works",
+       # full-contract forgery: score answers REQUIRE probabilities+legend
+       # (finding 4; the old bare {score, confidence} shape is now invalid and
+       # is asserted as such in the dedicated test below)
        { got <- suppressWarnings(withr_options(
            Rjif.transport = function(body)
-             list(answers = list(q = list(score = 2, confidence = 0.99))),
+             list(answers = list(q = list(score = 2, confidence = 0.99,
+                   probabilities = list("0" = 0, "1" = 0, "2" = 1),
+                   legend = list("0" = "none", "1" = "mild", "2" = "severe")))),
            jev_eval("s", list(q = jev_score_q("i", c("none", "mild", "severe"))))$q))
          identical(jvalue(got), 2) && isTRUE(all.equal(jprob(got), 0.99)) })
 expect("an UNNAMED 1-element array still unwraps to its scalar",
@@ -832,15 +845,26 @@ expect("named object score value rejected; 30 such rows leave analytics with use
        # a test bug, not a package bug -- the bad rows were never re-malformed)
        withr_options(
          Rjif.transport = function(body)
-           list(answers = list(q = list(score = list(wrong = 2), confidence = 1))), {
+           list(answers = list(q = list(score = list(wrong = 2), confidence = 1,
+                 probabilities = list("0" = 0, "1" = 0, "2" = 1),
+                 legend = list("0" = "none", "1" = "mild", "2" = "severe")))), {
            a <- suppressWarnings(jev_eval("s", list(q = jev_score_q(
              "i", c("none", "mild", "severe"))))$q)
            rejected <- is.na(jvalue(a))
            df <- suppressWarnings(jev_score_many(rep("narr", 30),
                     jev_score_q("i", c("none", "mild", "severe"))))
            df$truth <- TRUE
-           rejected && identical(attr(reliability_curve(df), "n_used"), 0L) &&
-             is.na(suppressWarnings(ece(df)))
+           # the batch is type=score: analytics now REFUSE its p as an event
+           # probability (finding 2) unless allow_type opts in; the intended
+           # property stands - 30 rejected rows leave event analytics with
+           # used=0. n_dropped$not_scored counts answered-but-abstained rows;
+           # contract-rejected rows have p=NA (bucket p_na). Both sum to 30.
+           rc <- tryCatch(reliability_curve(df), error = function(e) NULL)
+           g <- suppressWarnings(reliability_curve(df, allow_type = "score"))
+           rejected && is.null(rc) &&
+             identical(attr(g, "n_used"), 0L) &&
+             sum(unlist(attr(g, "n_dropped"))) == 30L &&
+             is.na(suppressWarnings(ece(df, allow_type = "score")))
          }) )
 expect("string/Date/POSIXt/raw/complex values and probability vectors are REJECTED, not coerced (R4-B1 N14-N17)",
        all(vapply(list(
@@ -869,7 +893,8 @@ expect("redaction runs AFTER validation: key-bearing offered option name keeps p
        { offered <- list(safety = "a", routine = "b"); names(offered)[1] <- fake_key
          a <- suppressWarnings(withr_options(
            Rjif.transport = function(body)
-             list(answers = list(q = list(choice = "routine", probabilities =
+             list(answers = list(q = list(choice = "routine", confidence = 0.9,
+                 probabilities =
                  stats::setNames(list(0.1, 0.9), c(fake_key, "routine"))))),
            jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
          identical(jvalue(a), "routine") && isTRUE(all.equal(jprob(a), 0.9)) &&
@@ -898,20 +923,30 @@ expect("R5-B1 (no-key control): pattern-colliding option names keep the SELECTED
        { offered <- list("Bearer option_alpha" = "first", "Bearer option_beta" = "second")
          tr <- function(body) list(answers = list(q = list(
            choice = "Bearer option_beta",
-           probabilities = stats::setNames(list(0.9, 0.1), names(offered)))))
+           # beta is the winner (0.9) so the answer satisfies the winner-
+           # consistency contract (finding 4); the R5-B1 property under test -
+           # the redacted names colliding at display time - is unchanged.
+           confidence = 0.9,
+           probabilities = stats::setNames(list(0.1, 0.9), names(offered)))))
          a <- suppressWarnings(withr_options(Rjif.transport = tr,
                jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
-         isTRUE(all.equal(jprob(a), 0.1)) &&
+         isTRUE(all.equal(jprob(a), 0.9)) &&
            identical(as.character(jvalue(a)), "Bearer [REDACTED]") })
 expect("R5-B1: exact-key-colliding probability names cannot inflate the selected p",
        { offered <- stats::setNames(list("first", "second"),
                                     c(fake_key, "[REDACTED-API-KEY]"))
+         # winner-consistent shape (finding 4): the SELECTED option carries
+         # 0.9; the property under test is that after display-time redaction
+         # makes both option names identical, jprob() still returns the bound
+         # 0.9 of the selected option and cannot be inflated to / stolen by a
+         # sibling's value via the colliding label (R5-B1 selected_p binding).
          tr <- function(body) list(answers = list(q = list(
            choice = "[REDACTED-API-KEY]",
-           probabilities = stats::setNames(list(0.9, 0.1), names(offered)))))
+           confidence = 0.9,
+           probabilities = stats::setNames(list(0.1, 0.9), names(offered)))))
          a <- suppressWarnings(withr_options(Rjif.transport = tr,
                jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
-         isTRUE(all.equal(jprob(a), 0.1)) })
+         isTRUE(all.equal(jprob(a), 0.9)) })
 expect("R5-B2: a contract warning naming a key-bearing question never emits the key",
        { msgs <- character(0)
          got <- withCallingHandlers(
@@ -1122,19 +1157,267 @@ expect("R6-B2: duplicate choice criteria names in an error never echo the key",
                            stats::setNames(c("A", "B"), c(fake_key, fake_key))),
                          error = function(e) conditionMessage(e))
          is.character(msg) && !grepl(fake_key, msg, fixed = TRUE) })
-expect("R5-B1 semantics unchanged after the attribute rework: collision keeps selected p=0.1",
+expect("R5-B1 semantics after the attribute rework: collision keeps the SELECTED p (0.9), not a sibling's",
        { offered <- list("Bearer option_alpha" = "first",
                          "Bearer option_beta" = "second")
          tr <- function(body) list(answers = list(q = list(
            choice = "Bearer option_beta",
-           probabilities = stats::setNames(list(0.9, 0.1), names(offered)))))
+           confidence = 0.9,
+           probabilities = stats::setNames(list(0.1, 0.9), names(offered)))))
          a <- suppressWarnings(withr_options(Rjif.transport = tr,
                jev_eval("s", list(q = jev_choice_q("i", offered)))$q))
-         isTRUE(all.equal(jprob(a), 0.1)) })
+         isTRUE(all.equal(jprob(a), 0.9)) &&
+           !identical(jprob(a), 0.1) })
 if (is.na(old_env_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
   do.call(Sys.setenv, list(TYPESAFE_API_KEY = old_env_key))
 
 # ===========================================================================
+cat("\n17. external audit (Omen Codex) findings 2-5 regressions\n")
+# --- finding 3: two-sided noul floor --------------------------------------
+forged_noul <- function(p) function(body) list(
+  model = "fixture", usage = list(input_tokens = 10L),
+  answers = list(q = list(type = "noul", noul = p)))
+expect("f3: a confident NO (p=0.01) decides FALSE under floor 0.7 (was NA)",
+       withr_options(Rjif.transport = forged_noul(0.01),
+                     isFALSE(jif("s", "x", confidence_floor = 0.7))))
+expect("f3: floor-window middle abstains with the floor named in the reason",
+       { d <- withr_options(Rjif.transport = forged_noul(0.5),
+              jif("s", "x", confidence_floor = 0.7))
+         isTRUE(jif_abstained(d)) &&
+           grepl("two-sided confidence_floor 0.700", jif_reason(d),
+                 fixed = TRUE) })
+expect("f3: floor at or below threshold keeps single-sided behavior exactly",
+       withr_options(Rjif.transport = forged_noul(0.4),
+                     isFALSE(jif("s", "x", confidence_floor = 0.4))))
+expect("f3: p=0.49 under floor 0.7 still abstains (the floor is not bypassed)",
+       withr_options(Rjif.transport = forged_noul(0.49),
+                     isTRUE(jif_abstained(jif("s", "x", confidence_floor = 0.7)))))
+expect("f3: choice/score floors stay single-sided (1-p is not evidence there)",
+       { tc <- function(body) list(answers = list(q = list(
+           type = "choice", choice = "a", confidence = 0.4,
+           probabilities = list(a = 0.4, b = 0.6))))
+         withr_options(Rjif.transport = tc,
+           isTRUE(jif_abstained(jif("s", jev_choice_q("i", c(a = "1", b = "2")),
+                                    confidence_floor = 0.7)))) })
+expect("f3: jif() and jev_score_many() agree on every window position",
+       { st <- c(0.01, 0.29, 0.31, 0.5, 0.69, 0.71, 0.99)
+         one <- vapply(st, function(p) withr_options(
+           Rjif.transport = forged_noul(p),
+           jif("s", "x", confidence_floor = 0.7, abstain = -99)), numeric(1))
+         many <- local({
+           i <- 0L
+           tr <- function(body) { i <<- i + 1L
+             list(model = "f", usage = list(input_tokens = 1L),
+                  answers = list(q = list(type = "noul", noul = st[[i]]))) }
+           d <- withr_options(Rjif.transport = tr,
+             jev_score_many(rep("s", length(st)), "x", confidence_floor = 0.7))
+           ifelse(is.na(d$decision), -99, d$decision) })
+         identical(one, as.numeric(many)) })
+
+# --- finding 2: probability-semantics gate + observed_rate rename ---------
+score_frame <- local({
+  tr <- function(body) list(answers = list(q = list(
+    type = "score", score = 0.02, confidence = 1,
+    probabilities = list("0" = 0.9998, "1" = 0.0001, "2" = 0.0001),
+    legend = list("0" = "a", "1" = "b", "2" = "c"))))
+   df <- withr_options(Rjif.transport = tr,
+     jev_score_many(rep("narr", 30), jev_score_q("i", c("a", "b", "c")),
+                    threshold = 1))
+  df$truth <- 0
+  df })
+expect("f2: a score batch's p is REFUSED as an event probability by default",
+       grepl("question_type is 'score'",
+             err_msg(reliability_curve(score_frame)), fixed = TRUE))
+expect("f2: ece() and selection_curve() share the same gate",
+       throws(ece(score_frame)) && throws(selection_curve(score_frame)))
+expect("f2: allow_type = 'score' opts in WITH a warning naming the quantity",
+       { w <- warn_msg(reliability_curve(score_frame, allow_type = "score"))
+         rc <- suppressWarnings(reliability_curve(score_frame,
+                                                  allow_type = "score"))
+         grepl("concentration", w, fixed = TRUE) && attr(rc, "n_used") == 30L })
+expect("f2: a noul batch and a hand-built frame pass ungated",
+       { ok <- withr_options(Rjif.transport = forged_noul(0.9),
+           jev_score_many(c("s", "s"), "x"))
+         ok$truth <- c(1, 1)
+         !throws(reliability_curve(ok)) &&
+           !throws(reliability_curve(data.frame(p = c(0.2, 0.8),
+                                                truth = c(0, 1)))) })
+expect("f2: a choice batch is gated too (P(selected option) != P(event))",
+       { tc <- function(body) list(answers = list(q = list(
+           type = "choice", choice = "a", confidence = 0.9,
+           probabilities = list(a = 0.9, b = 0.1))))
+         d <- withr_options(Rjif.transport = tc,
+           jev_score_many(rep("s", 3), jev_choice_q("i", c(a = "1", b = "2"))))
+         d$truth <- c(1, 0, 0)
+         throws(reliability_curve(d)) &&
+           !throws(reliability_curve(d, allow_type = "choice")) })
+expect("f2: the reliability table column is observed_rate; accuracy is GONE",
+       { rc <- reliability_curve(data.frame(p = c(0.1, 0.9), truth = c(0, 1)),
+                                 n_bins = 2L)
+         identical(rc$observed_rate, c(0, 1)) && !("accuracy" %in% names(rc)) &&
+           is.null(rc[["accuracy"]]) })
+
+# --- finding 4: contract validators ---------------------------------------
+expect("f4: choice answer contradicting its own argmax is rejected (probe 3)",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "choice", choice = "a", confidence = 0.01,
+           probabilities = list(a = 0.01, b = 0.99))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_choice_q("i", c(a = "1", b = "2")))))$q)
+         is.na(jvalue(a)) && grepl("trails the top option", a$contract,
+                                   fixed = TRUE)
+         # the same forged answer through jif() must abstain, not silently
+         # route to the second option (a contract-violating winner is never
+         # forwarded as a decision). is.na, not identical(NA): jif's abstain
+         # default NA is a logical here for choice but NA_character_ for
+         # score/jmatch paths, and an assertion must not pin that detail.
+         { d <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jif("s", jev_choice_q("i", c(a = "1", b = "2")))))
+           length(d) == 1L && is.na(d) } })
+expect("f4: a 0.01 winner gap inside rounding tolerance is still ACCEPTED",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "choice", choice = "a", confidence = 0.5,
+           probabilities = list(a = 0.49, b = 0.51))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_choice_q("i", c(a = "1", b = "2")))))$q)
+         identical(jvalue(a), "a") && is.na(a$contract) })
+expect("f4: bare {score, confidence} without distribution/legend is rejected (probe 4)",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "score", score = 2, confidence = 1)))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_score_q("i", c("a", "b", "c")))))$q)
+         is.na(jvalue(a)) && grepl("no probability distribution", a$contract,
+                                   fixed = TRUE) })
+expect("f4: score legend keys must cover 0..k-1",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "score", score = 2, confidence = 1,
+           probabilities = list("0" = 0, "1" = 0, "2" = 1),
+           legend = list("1" = "b", "2" = "c"))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_score_q("i", c("a", "b", "c")))))$q)
+         is.na(jvalue(a)) && grepl("legend keys", a$contract, fixed = TRUE) })
+expect("f4: a score contradicting its own weighted mean is rejected",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "score", score = 0.5, confidence = 1,
+           probabilities = list("0" = 0, "1" = 0, "2" = 1),
+           legend = list("0" = "a", "1" = "b", "2" = "c"))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_score_q("i", c("a", "b", "c")))))$q)
+         is.na(jvalue(a)) && grepl("contradicts", a$contract, fixed = TRUE) })
+expect("f4: choice answer lacking confidence is rejected (required by docs)",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "choice", choice = "a",
+           probabilities = list(a = 1, b = 0))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_choice_q("i", c(a = "1", b = "2")))))$q)
+         is.na(jvalue(a)) && grepl("lacks a confidence", a$contract,
+                                   fixed = TRUE) })
+expect("f4: out-of-range request shapes are refused before transport",
+       { hits <- character(0)
+         tr <- function(body) { hits <<- c(hits, "CALLED")
+           list(answers = list(q = list(type = "noul", noul = 0.5))) }
+         e1 <- err_msg(withr_options(Rjif.transport = tr,
+                        jev_score_q("i", "only-one-level")))
+         e2 <- err_msg(withr_options(Rjif.transport = tr,
+                        jev_score_q("i", paste0("L", 1:11))))
+         e3 <- err_msg(withr_options(Rjif.transport = tr,
+                        jev_choice_q("i", as.list(setNames(
+                          rep("d", 256), paste0("opt", 1:256))))))
+         e4 <- err_msg(withr_options(Rjif.transport = tr,
+                        jev_choice_q("i", list(only = "x"))))
+         length(hits) == 0L &&
+           grepl("needs at least 2 levels", e1, fixed = TRUE) &&
+           grepl("allows 10", e2, fixed = TRUE) &&
+           grepl("allows 255", e3, fixed = TRUE) &&
+           grepl("needs at least 2 options", e4, fixed = TRUE) })
+expect("f4: jev_noul_q accepts documented true/false criteria and sends them",
+       { sent <- NULL
+         tr <- function(body) { sent <<- body
+           list(answers = list(q = list(type = "noul", noul = 0.77))) }
+         v <- withr_options(Rjif.transport = tr,
+              jev_eval("s", list(q = jev_noul_q("x", criteria = list(
+                true = "explicit present", false = "explicit absent")))))$q
+         identical(sent$questions$q$criteria,
+                   list(true = "explicit present", false = "explicit absent")) &&
+           identical(jvalue(v), 0.77) })
+expect("f4: bogus noul criteria names are refused",
+       throws(jev_noul_q("x", criteria = list(yes = "y"))))
+expect("f4: the true/false shorthand is noul criteria, NOT a 2-option choice",
+       { q <- as_question("is this urgent", list(true = "fast", false = "slow"))
+         q$type == "noul" && identical(q$criteria, list(true = "fast",
+                                                        false = "slow")) })
+expect("f4: structured list states reach the transport unharmed",
+       { sent <- NULL
+         tr <- function(body) { sent <<- body
+           list(answers = list(q = list(type = "noul", noul = 0.5))) }
+         st <- list(patient = list(age = 67L),
+                    events = list(list(term = "FEVER", grade = 2L)))
+         v <- withr_options(Rjif.transport = tr,
+              jev_eval(st, list(q = jev_noul_q("x"))))
+         identical(sent$state, st) && identical(names(sent$questions), "q") })
+expect("f4: empty/nested-empty list states are refused locally",
+       throws(jev_eval(list(), list(q = jev_noul_q("x")))))
+
+# --- finding 5: retry policy + resumable cache ----------------------------
+backoff_wait <- .pick(".backoff_wait")
+expect("f5: backoff is exponential, capped, and never negative",
+       { w <- vapply(1:8, function(a) backoff_wait(a, 1, 30, NULL), numeric(1))
+         all(w >= 1 & w <= 30) && w[[2]] >= w[[1]] && w[[8]] == 30 })
+expect("f5: a sane Retry-After overrides computed backoff",
+       backoff_wait(1, 1, 30, "7") == 7 &&
+         backoff_wait(1, 1, 30, "9999", max_wait = 120) == 120 &&
+         # garbage Retry-After (date form, negative, NA) falls back to computed
+         backoff_wait(1, 1, 30, "Wed, 21 Oct 2026 07:28:00 GMT") >= 1 &&
+         backoff_wait(1, 1, 30, "-5") >= 1 &&
+         backoff_wait(1, 1, 30, NA_character_) >= 1)
+expect("f5: cache round-trips a full score_many frame byte-equivalently",
+       local({
+         cf <- tempfile(fileext = ".rds")
+         on.exit(unlink(cf))
+         tr <- function(body) list(model = "f",
+           usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul", noul = 0.8)))
+         a <- withr_options(Rjif.transport = tr,
+              jev_score_many(c("s1", "s2", "s3"), "x", cache = cf))
+         b <- withr_options(Rjif.transport = tr,
+              jev_score_many(c("s1", "s2", "s3"), "x", cache = cf))
+         calls_a <- jev_usage()$calls
+         b_calls <- local({ n0 <- jev_usage()$calls
+           invisible(b); jev_usage()$calls - n0 })
+         identical(b[1:6], a[1:6]) && identical(attr(b, "n_resumed"), 3L)
+       }))
+expect("f5: a cache built for another question fingerprint is ignored loudly",
+       local({
+         cf <- tempfile(fileext = ".rds")
+         on.exit(unlink(cf))
+         tr1 <- function(body) list(model = "f", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul", noul = 0.8)))
+         invisible(withr_options(Rjif.transport = tr1,
+           jev_score_many(c("s1", "s2"), "question A", cache = cf)))
+         w <- warn_msg(withr_options(Rjif.transport = tr1,
+           jev_score_many(c("s1", "s2"), "question B", cache = cf)))
+         grepl("does not match", w, fixed = TRUE)
+       }))
+expect("f5: cache rows that previously ERRORED are re-run by default",
+       local({
+         cf <- tempfile(fileext = ".rds")
+         on.exit(unlink(cf))
+         n <- 0L
+         tr <- function(body) {
+           n <<- n + 1L
+           if (n == 1L) stop("transient boom")
+           list(model = "f", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.8)))
+         }
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_score_many("s1", "x", cache = cf)))
+         n_after_first <- n
+         b <- withr_options(Rjif.transport = tr,
+               jev_score_many("s1", "x", cache = cf))
+         nzchar(a$error[[1]]) && n_after_first == 1L && n == 2L &&
+           isTRUE(b$decision[[1]]) && identical(attr(b, "n_resumed"), 0L)
+       }))
+
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))

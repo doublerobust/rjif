@@ -15,9 +15,12 @@ jif_abstained(x)
 jif_reason(x)
 }
 \arguments{
-  \item{state}{single string: the text or record to judge (for example, an
-    adverse-event narrative or a support ticket). The API takes one state per
-    call; to score a vector of states use \code{\link{jev_score_many}}.}
+  \item{state}{single non-NA string (the text or record to judge, for example
+    an adverse-event narrative or a support ticket), or a non-empty
+    \code{list} for structured states (records, nested fields, chat logs),
+    serialized to the API as a JSON object. The API takes one state per call;
+    to score a vector of states use \code{\link{jev_score_many}}. A character
+    vector is always an error.}
 
   \item{question}{either a single string (read as a Noul assertion: "is this
     true of the state?") or a question spec built with
@@ -25,9 +28,10 @@ jif_reason(x)
     \code{\link{jev_score_q}}.}
 
   \item{...}{for \code{jif()}: with the string shorthand, a single named
-    list or character vector of option descriptions turns the question into
-    a Choice question (\code{option = description}). Nothing else is read
-    from these arguments.}
+    list or character vector. Names within \code{\{true, false\}} only are
+    read as Noul outcome criteria (\code{true = "what a yes means"}); any
+    other names make it a Choice question (\code{option = description}).
+    Nothing else is read from these arguments.}
 
   \item{threshold}{numeric. For a Noul question: the probability at or above
     which the assertion counts as TRUE (default 0.5). For a Score question
@@ -39,10 +43,16 @@ jif_reason(x)
     (default \code{NA}). \code{NA} is deliberate: \code{if (jif(...))} then
     errors instead of routing an undecided row into the \code{else} branch.}
 
-  \item{confidence_floor}{numeric in [0, 1] (default 0, no gating). If the
-    probability behind the decision (see \code{\link{jprob}}) is below the
-    floor, \code{jif()} abstains. \code{NA} means "abstain always", which is
-    useful in tests. A finite value outside [0, 1] warns: \code{<= 0} never
+  \item{confidence_floor}{numeric in [0, 1] (default 0, no gating). For
+    Choice and Score questions, and for Noul when the floor is at or below
+    \code{threshold}: if the probability behind the decision (see
+    \code{\link{jprob}}) is below the floor, \code{jif()} abstains. For NOUL
+    with \code{floor > threshold} the floor acts as a TWO-SIDED evidence
+    standard: decide TRUE when P(yes) >= floor, decide FALSE when
+    P(yes) <= 1 - floor, abstain in between (the middle is genuinely
+    uncertain; a confident NO is not forced to abstain, which a one-sided
+    floor did before). \code{NA} means "abstain always", which is useful in
+    tests. A finite value outside [0, 1] warns: \code{<= 0} never
     gates, \code{> 1} gates everything.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option,

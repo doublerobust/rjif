@@ -4,7 +4,7 @@
 \title{One Question Over Many States, and Branch Routing}
 \usage{
 jev_score_many(state_vec, question, ..., threshold = 0.5,
-               confidence_floor = 0, batch = 16L,
+               confidence_floor = 0, batch = 16L, cache = NULL,
                model = getOption("Rjif.model", "jev-latest"))
 
 jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
@@ -30,13 +30,25 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     Noul, a rubric level for Score, unused for Choice.}
 
   \item{confidence_floor}{numeric in [0, 1], or \code{NA} to abstain on every
-    row (useful in tests). Applied to \code{\link{jprob}}, like
-    \code{jif()}.}
+    row (useful in tests). Same policy as \code{\link{jif}}, including the
+    two-sided noul window when the floor exceeds \code{threshold}; abstained
+    rows carry the reason in the \code{error} column.}
 
-  \item{batch}{chunk size for the internal loop. It changes nothing the
-    caller observes (no progress output is emitted) and does not batch the
-    API: each non-NA state is still one HTTP request, and NA states are
-    skipped without a call.}
+  \item{batch}{chunk size for the internal loop. Does not batch the API: each
+    non-NA state is still one HTTP request, and NA states are skipped without
+    a call. With \code{cache} set, it also controls how much work an interrupt
+    can lose (the cache is rewritten once per chunk); without a cache it
+    changes nothing the caller observes.}
+
+  \item{cache}{\code{NULL} (default) or a path string. When set, results are
+    persisted to that file after every chunk and reloaded at the start of a
+    later call with the same path, question, and row count: an interrupted
+    bulk run resumes instead of re-billing completed rows. Rows whose earlier
+    attempt errored are re-run by default; set
+    \code{options(Rjif.cache_rerun_errors = FALSE)} to keep them cached. The
+    returned frame gains an \code{n_resumed} attribute. A cache file holds API
+    answers in row order (states are not stored) but can still disclose your
+    data: protect it accordingly.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
     \code{"jev-latest"}.}
@@ -67,9 +79,13 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
   Choice, "true"/"false" for Noul, or the continuous rubric position as text,
   e.g. \code{"1.050"}, for Score), \code{p} (the \code{\link{jprob}} behind
   the decision), \code{confidence} (the API confidence; \code{NA} for Noul),
-  \code{abstained}, and \code{error} (per-row contract/API text, redacted of
-  any API key; empty string when clean). Attributes \code{n_abstained} and
-  \code{question_type} summarise the run; the row count is \code{nrow(df)}.
+  \code{abstained}, and \code{error} (per-row failure or abstention text,
+  redacted of any API key; empty string when clean. Since the two-sided noul
+  floor, rows policy-abstained by \code{confidence_floor} also record their
+  reason here, same wording as \code{\link{jif_reason}}). Attributes
+  \code{n_abstained} and \code{question_type} summarise the run,
+  \code{n_resumed} states how many rows came from \code{cache}; the row count
+  is \code{nrow(df)}.
 
   \code{jmatch()} returns the chosen branch name, or \code{fallback}.
 }

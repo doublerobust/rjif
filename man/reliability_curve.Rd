@@ -4,12 +4,13 @@
 \alias{selection_curve}
 \title{Descriptive Calibration Diagnostics}
 \usage{
-reliability_curve(df, p = "p", truth = "truth", n_bins = 10L)
+reliability_curve(df, p = "p", truth = "truth", n_bins = 10L,
+                  allow_type = NULL)
 
-ece(df, p = "p", truth = "truth", n_bins = 10L)
+ece(df, p = "p", truth = "truth", n_bins = 10L, allow_type = NULL)
 
 selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
-                p = "p", truth = "truth")
+                p = "p", truth = "truth", allow_type = NULL)
 }
 \arguments{
   \item{df}{a data frame with one column of predicted probabilities and one
@@ -37,13 +38,30 @@ selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
   \item{floor_seq}{numeric vector of decision thresholds, no NA allowed.
     Values outside [0, 1] warn and then apply literally: a floor at or below
     0 keeps every usable row, a floor above 1 keeps none.}
+
+  \item{allow_type}{character vector of batch question types whose \code{p}
+    column you accept as the probability to calibrate. The estimators measure
+    EVENT-PROBABILITY calibration, and \code{p} means different things by
+    batch type: for a noul batch it is P(assertion true) (the right quantity,
+    never gated); for a choice batch it is the probability of the SELECTED
+    option; for a score batch it is the vendor confidence, i.e. how
+    concentrated the level distribution is, which is not a probability of any
+    event. A choice or score batch therefore ERRORS by default with an
+    explanation instead of silently producing a misleading curve; pass
+    \code{allow_type = "score"} (or \code{"choice"}) to compute it anyway,
+    which warns that the result is not calibration in the usual sense.
+    Hand-built data frames without a \code{question_type} attribute are your
+    contract and pass ungated.}
 }
 \value{
   \code{reliability_curve()} returns a data frame with one row per bin
   (empty bins included, so the shape is stable): \code{bin} (the cut label),
   \code{n} (rows in bin), \code{mean_p} (mean predicted probability),
-  \code{accuracy} (the observed event frequency in the bin: this is the
-  outcome rate, not classification accuracy). Attributes: \code{n_used},
+  \code{observed_rate} (the event frequency in the bin: this is the
+  outcome rate, not classification accuracy). RENAMED from \code{accuracy}
+  in 0.0.1 (breaking): the old name read as a failure rate in bins where the
+  event never occurs, next to a perfectly calibrated \code{mean_p}.
+  Attributes: \code{n_used},
   \code{n_bins}, \code{n_out_of_range} (rows dropped for a probability
   outside [0, 1]), and \code{n_dropped}, a list with mutually exclusive
   buckets:

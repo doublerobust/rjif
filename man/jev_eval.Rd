@@ -10,7 +10,7 @@
 \usage{
 jev_eval(state, questions, model = getOption("Rjif.model", "jev-latest"))
 
-jev_noul_q(instructions)
+jev_noul_q(instructions, criteria = NULL)
 
 jev_choice_q(instructions, criteria)
 
@@ -42,8 +42,15 @@ jconf(ans)
     description is allowed. For Score: a character vector of ordered level
     descriptions, lowest severity first, or a list of structured level
     objects (\code{list(what = "...", examples = list("...")}) with the same
-    fields on every level. Levels are labelled \code{"0"} to \code{k-1} in
-    the response legend.}
+    fields on every level. Score needs at least two levels (one level is
+    accepted by the endpoint but auto-unboxes to a bare scalar string, which
+    is never what you want; eleven or more are out of contract). For Noul: a
+    named list of exactly \code{true} and \code{false} rubrics refining what
+    each answer means (\code{list(true = "explicitly reported by a
+    clinician", false = "mentioned only as ruled out")}); the vendor accepts
+    these and the shorthand \code{jif(state, "assertion")} still sends none.
+    Levels are labelled \code{"0"} to \code{k-1} in the response legend.
+    Choice takes 2 to 255 options.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
     \code{"jev-latest"}.}

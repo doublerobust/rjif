@@ -43,6 +43,16 @@ If the model gives no usable number, or the probability falls below the
 want undecided rows sliding into the else branch. Use `j_ifelse()` and give the
 `unknown` arm somewhere to go.
 
+For a true/false (`jev_noul_q()`) question the floor is two-sided, because the
+raw probability is the evidence there and a confident NO deserves to win as
+easily as a confident YES. With `threshold = 0.5` and
+`confidence_floor = 0.7`: `p >= 0.7` decides TRUE, `p <= 0.3` decides FALSE,
+in between abstains. A floor at or below the threshold stays one-sided (only
+TRUE needs to clear it; anything else abstains). For multiple-choice and score
+questions the floor is one-sided by design: there is no single "negative side"
+of a named-option pick, so `1 - p` has no decision meaning and the floor
+applies to the selected answer only.
+
 `jif_reason()` says which case you're in:
 
 - `"no answer value from the API"`: Jev returned nothing usable (the answer
@@ -50,6 +60,9 @@ want undecided rows sliding into the else branch. Use `j_ifelse()` and give the
   of "false".
 - `"probability 0.612 < confidence_floor 0.700"`: there is an answer, and you
   decided it's not strong enough to act on.
+- `"probability 0.500 is in the uncertain middle of the two-sided
+  confidence_floor 0.700 (negative cut 0.300)"`: a noul answer that cleared
+  neither side of the window.
 - `"confidence unavailable with a floor set"`: a decision exists but no
   probability backs it, and you required one. The validator rejects answer
   shapes without a usable probability, so in ordinary traffic you'll rarely
@@ -77,8 +90,18 @@ The API takes one state per call, so `jev_score_many()` loops over your
 vector, one HTTP request per row, and returns a data frame with `decision`,
 `option`, `p`, `confidence`, `abstained`, and `error` columns. Errors are
 captured per row: one unparsable narrative doesn't discard the other 4,999.
-For score rows the `option` column holds the position as text, e.g.
-`"1.050"`.
+Policy abstentions land in `error` too, so a resumed batch tells you why a
+row was never decided. For score rows the `option` column holds the position
+as text, e.g. `"1.050"`.
+
+For a long batch, pass `cache = "path.rds"`. After every chunk the results
+are written to that file; a later call with the same path, question, and row
+count reloads it and skips completed rows. Kill the process at row 3,000 of
+5,000 and you pay to restart at row 3,001, not row 1. Rows that failed on an
+earlier pass are re-run by default (set
+`options(Rjif.cache_rerun_errors = FALSE)` to keep the failure), the cache
+refuses to load when the question text, model, or row count changed under
+it, and `attr(df, "n_resumed")` tells you how many rows came back for free.
 
 ## Checking calibration
 
@@ -103,10 +126,21 @@ exact: every dropped row lands in exactly one `n_dropped` bucket, and
 `n_used + sum(dropped) == nrow(df)`.
 The `pos_rate` in `selection_curve()` is the event prevalence among kept rows,
 a coverage/PPV view rather than accuracy (that would need true negatives too).
-Reliability curves only mean something against gold truth; score Jev against
-another model's labels and you've measured agreement, not calibration. And
-there are no standard errors, bands, or hypothesis tests anywhere in here. A
-10-bin curve from 50 rows is a sketch.
+The per-bin column is called `observed_rate`, not `accuracy`: it is the
+frequency of the event, and next to a perfectly calibrated `mean_p` of 0.05
+it used to read as a 5% failure rate. Reliability curves only mean something
+against gold truth; score Jev against another model's labels and you've
+measured agreement, not calibration. And there are no standard errors, bands,
+or hypothesis tests anywhere in here. A 10-bin curve from 50 rows is a sketch.
+
+One more trap this section can't paper over: `ece()` and `reliability_curve()`
+measure calibration of an event probability. The `p` column from a noul batch
+is exactly that (P(assertion true)). The `p` from a score batch is the vendor
+"confidence": how concentrated the level distribution is, which is not a
+probability of any event, and the same number from a choice batch is P(chosen
+option) -- a third thing. Calibrating a score or choice batch against event
+truth errors by default and tells you why; pass
+`allow_type = c("score", "choice")` if you want the numbers anyway.
 
 ## Things to know before you use it
 
@@ -120,6 +154,18 @@ and this README can't answer it.
 
 Cost and latency grow with rows: `jev_score_many()` is one call per row, and
 the `batch` argument is an internal chunk size, not request batching.
+
+A hung socket shouldn't freeze a 5,000-row batch, so every request carries a
+hard timeout (`Rjif.timeout`, default 120s) and retries: 429/529 statuses
+and connection-level errors (timeout, DNS, refused) get `Rjif.retries`
+attempts (default 3), sleeping
+`min(cap, base * 2^(attempt-1))` seconds, with `Retry-After` honored when the
+API sends it. Tune with `Rjif.retry_base` (1s), `Rjif.retry_cap` (30s), and
+`Rjif.retry_max_wait` (120s, the ceiling on any single sleep). A non-retryable
+error (401, 403, 404, 422) stops on the first try; the message reports the
+attempt count and, for exhausted retries, that the vendor may have billed
+timed-out attempts. Retries never inflate the usage counters:
+`jev_usage()` counts decoded responses, so failed attempts count zero.
 
 `rjif_mock_transport()` is for testing with no key and no network. Its
 numbers are deterministic hashes, statistically meaningless, and the source

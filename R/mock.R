@@ -76,7 +76,17 @@ rjif_mock_transport <- function(body = NULL, answers = NULL) {
 }
 
 .rjif_mock_reply <- function(body, script) {
-  state_txt <- body$state %||% ""
+  state_raw <- body$state %||% ""
+  # structured states (lists) are valid API input; flatten to text only for
+  # the token ESTIMATE below - the mock's answers stay state-blind by design
+  # (documented), so nothing here may read meaning out of state.
+  state_txt <- if (is.character(state_raw)) {
+    paste(state_raw, collapse = "\r")
+  } else {
+    tryCatch(jsonlite::toJSON(state_raw, auto_unbox = TRUE),
+             error = function(e) "")
+  }
+  if (!length(state_txt) || is.na(state_txt)) state_txt <- ""
   questions <- body$questions
   if (is.null(questions) || !length(questions)) {
     stop("Rjif mock: request body had no 'questions'.", call. = FALSE)

@@ -33,7 +33,18 @@
 # probability that the assertion holds). For choice questions the floor is
 # applied to the probability of the selected option; for score questions to the
 # API confidence. jprob() gives you whichever of those applies.
-
+#
+# TWO-SIDED DECISIONS (external audit finding 3, 2026-09-19): with threshold
+# 0.5, applying a single POSITIVE floor (e.g. 0.7) means only TRUE and NA are
+# reachable -- P(yes)=0.01, a confident NO, abstains. For noul questions a
+# floor above the threshold is therefore honoured as a two-sided decision
+# window: decide TRUE when p >= confidence_floor, decide FALSE when
+# p <= 1 - confidence_floor (equivalently 1-p >= floor: the SAME evidence
+# standard applied to the negative side), abstain in between. This makes the
+# README's auto-triage / routine-pile / human-reviewer pattern actually
+# reachable. choice and score questions keep the single-sided floor (their
+# "negative side" is a set of named options, not a complement -- 1-p has no
+# decision meaning there), and jif_reason() spells the window out.
 jif <- function(state, question, ..., threshold = 0.5,
                 abstain = NA, confidence_floor = 0,
                 model = getOption("Rjif.model", "jev-latest")) {
@@ -46,50 +57,16 @@ jif <- function(state, question, ..., threshold = 0.5,
   if (is.na(confidence_floor)) confidence_floor <- Inf
   .check_floor_range(confidence_floor)
   ans <- jev_eval(state, list(q = q), model = model)$q
-  v <- jvalue(ans)
 
-  # Missingness is never evidence of "false". A null/absent value abstains even
-  # when confidence_floor is 0 -- there is simply nothing to threshold.
-  if (is.na(v)) {
+  # Decision policy lives in .decide_answer(), shared verbatim with
+  # jev_score_many() so single-row and batch calls can never drift.
+  d <- .decide_answer(ans, q, threshold, confidence_floor)
+  if (is.na(d$dec)) {
     return(structure(abstain, abstained = TRUE, answer = ans,
-                     abstain_reason = "no answer value from the API"))
+                     abstain_reason = d$reason))
   }
-
-  # Below the floor the decision is "unknown", not "whatever thresholding
-  # happens to say". An NA probability with a floor set is also unknown.
-  if (confidence_floor > 0) {
-    p <- jprob(ans)
-    if (is.na(p)) {
-      return(structure(abstain, abstained = TRUE, answer = ans,
-                       abstain_reason = "confidence unavailable with a floor set"))
-    }
-    if (p < confidence_floor) {
-      return(structure(abstain, abstained = TRUE, answer = ans,
-                       abstain_reason = paste0("probability ", formatC(p, format = "f",
-                                                                       digits = 3),
-                                               " < confidence_floor ",
-                                               formatC(confidence_floor, format = "f",
-                                                       digits = 3))))
-    }
-  }
-
-  out <- switch(q$type,
-    # noul: probability the assertion holds -> compare against the threshold
-    noul   = v >= threshold,
-    # choice: the selected option name (a string, not TRUE/FALSE)
-    choice = v,
-    # score: CONTINUOUS probability-weighted level position (0 = lowest level;
-    # live contract: can land between levels). NOTE: for score questions
-    # `threshold` is a LEVEL, not a probability -- with 5 levels, threshold = 2
-    # means "the weighted position clears moderate or worse", not a hard class.
-    score  = v >= threshold,
-    # only reachable with a hand-forged question object, but scrub anyway
-    # (R9-B1 precedent): a key in q$type must not leave via this message.
-    stop(.clean_error_text(paste0("Rjif: unknown question type '",
-                                  as.character(q$type)[[1L]], "'.")),
-         call. = FALSE))
-
-  structure(out, abstained = FALSE, answer = ans, abstain_reason = NA_character_)
+  structure(d$dec, abstained = FALSE, answer = ans,
+            abstain_reason = NA_character_)
 }
 
 .single_number <- function(x, what, allow_na = FALSE) {
@@ -132,6 +109,14 @@ jif <- function(state, question, ..., threshold = 0.5,
              "string shorthand; pass it as 'question' instead.", call. = FALSE)
       }
       if ((is.list(d) || is.character(d)) && !is.null(names(d)) && any(nzchar(names(d)))) {
+        # names exactly within {true, false} = noul criteria clarification,
+        # not a choice question (audit finding 4: jev_noul_q now exposes the
+        # documented optional criteria; the shorthand must not misread them
+        # as two options named "true"/"false")
+        dn <- unique(names(d)[nzchar(names(d))])
+        if (all(dn %in% c("true", "false"))) {
+          return(jev_noul_q(question, criteria = d))
+        }
         return(jev_choice_q(question, d))
       }
       if (is.list(d) || is.character(d)) {
@@ -145,6 +130,47 @@ jif <- function(state, question, ..., threshold = 0.5,
   }
   stop("Rjif: question must be a single non-NA string or a ",
        "jev_noul_q/jev_choice_q/jev_score_q spec.", call. = FALSE)
+}
+
+# Shared decision core for jif() and jev_score_many() so the two can never
+# drift (external audit finding 3). Given a validated answer `ans` for
+# question `q`, a threshold, and a floor, returns list(dec, reason):
+#   dec      TRUE/FALSE, or NA (abstain; `reason` explains).
+#   reason   NA_character_ when decided; abstention text otherwise.
+# Noul with floor > threshold uses the two-sided window: TRUE above the floor,
+# FALSE below 1-floor, abstain in between. All other combinations keep the
+# single-sided policy: gate jprob() against the floor, then threshold.
+.decide_answer <- function(ans, q, threshold, confidence_floor) {
+  v <- jvalue(ans)
+  if (is.na(v)) return(list(dec = NA, reason = "no answer value from the API"))
+  if (q$type == "noul" && confidence_floor > threshold &&
+      confidence_floor <= 1) {
+    p <- suppressWarnings(as.double(v))
+    if (is.na(p)) return(list(dec = NA, reason = "confidence unavailable with a floor set"))
+    neg_cut <- 1 - confidence_floor
+    if (p >= confidence_floor) return(list(dec = TRUE, reason = NA_character_))
+    if (p <= neg_cut) return(list(dec = FALSE, reason = NA_character_))
+    return(list(dec = NA, reason = paste0(
+      "probability ", formatC(p, format = "f", digits = 3),
+      " is in the uncertain middle of the two-sided confidence_floor ",
+      formatC(confidence_floor, format = "f", digits = 3),
+      " (negative cut ", formatC(neg_cut, format = "f", digits = 3), ")")))
+  }
+  if (confidence_floor > 0) {
+    p <- jprob(ans)
+    if (is.na(p)) return(list(dec = NA, reason = "confidence unavailable with a floor set"))
+    if (p < confidence_floor) {
+      return(list(dec = NA, reason = paste0(
+        "probability ", formatC(p, format = "f", digits = 3),
+        " < confidence_floor ", formatC(confidence_floor, format = "f", digits = 3))))
+    }
+  }
+  dec <- switch(q$type,
+    noul  = v >= threshold,
+    choice = v,           # option name; the caller records it in 'option'
+    score = v >= threshold,
+    NA)
+  list(dec = dec, reason = NA_character_)
 }
 
 # Was a jif() result an abstention? Also TRUE for a bare NA, so that
@@ -179,20 +205,21 @@ jif_reason <- function(x) {
 #              confidence for noul, which is why confidence_floor is applied to
 #              'p' for that type.
 #   abstained  TRUE when the row could not be decided: no answer value, p under
-#              confidence_floor, p unavailable while a floor was set, an invalid
+#              confidence_floor (single-sided) or inside the two-sided noul
+#              floor window, p unavailable while a floor was set, an invalid
 #              API answer, or an NA state / transport failure for that row.
 #   error      per-row failure text ("" when the row succeeded), scrubbed of any
 #              control characters AND of the caller's API key before it is
 #              persisted, so one bad narrative does not discard the other 4,999
 #              and a printed data frame can never leak the credential.
 #
-# 'batch' is the number of rows processed per progress chunk. The API takes ONE
-# state per call, so this loop is one HTTP request per row either way; batch
-# does NOT amortise cost or latency, it only bounds how many rows are attempted
-# before an unexpected transport error can surface.
+# 'batch' is the internal chunk size: one HTTP request per row either way
+# (the API takes ONE state per call). It changes nothing without a cache;
+# with cache = <path> it bounds how much completed work an interrupt can
+# lose, because the cache is rewritten once per chunk.
 jev_score_many <- function(state_vec, question, ...,
                            threshold = 0.5, confidence_floor = 0,
-                           batch = 16L,
+                           batch = 16L, cache = NULL,
                            model = getOption("Rjif.model", "jev-latest")) {
   q <- .as_question(question, ...)
   threshold <- .single_number(threshold, "threshold")
@@ -208,13 +235,73 @@ jev_score_many <- function(state_vec, question, ...,
   batch <- suppressWarnings(as.integer(batch))
   if (length(batch) != 1L || is.na(batch) || batch < 1L) batch <- 16L
 
+  # RESUMABLE BULK EXECUTION (external audit finding 5): with cache = <path>,
+  # completed rows are persisted after each batch and reloaded on start, so an
+  # interrupted 5,000-row run continues where it stopped instead of re-billing
+  # everything. Keying is BY ROW INDEX plus a question fingerprint: the cache
+  # is only honoured when the same file was written for the same question
+  # text and the same n; states are matched by position, so do not reorder
+  # state_vec between runs of one cache file (documented). Rows whose previous
+  # attempt ERRORED (non-empty error column) are re-run by default; set
+  # option Rjif.cache_rerun_errors = FALSE to keep error rows cached too.
+  # The cache file is a serialized R object on YOUR disk: it contains the API
+  # answers, so protect it like your data, and note the package cannot
+  # de-identify your narratives - they are in the file's row order, not in it
+  # verbatim (states are not stored), but answers + order can disclose a lot.
+  cache_resumed <- 0L
+  cache_fingerprint <- paste0(q$type, ":",
+    substr(as.character(paste(unlist(q$instructions, use.names = FALSE),
+                              collapse = " ")), 1L, 200L))
   dec <- rep(NA, n); ps <- rep(NA_real_, n); cf <- rep(NA_real_, n)
   chosen <- rep(NA_character_, n); abst <- rep(NA, n); errs <- rep("", n)
+  filled <- rep(FALSE, n)
+  if (!is.null(cache)) {
+    if (!is.character(cache) || length(cache) != 1L || is.na(cache) ||
+        !nzchar(cache)) {
+      stop("Rjif: cache must be a single path string (or NULL).", call. = FALSE)
+    }
+    if (file.exists(cache)) {
+      prev <- tryCatch(readRDS(cache), error = function(e) {
+        warning("Rjif: cache file '", cache, "' could not be read as an RDS ",
+                "(", .clean_error_text(conditionMessage(e), 120L),
+                "); starting fresh.", call. = FALSE)
+        NULL
+      })
+      if (is.data.frame(prev) && nrow(prev) == n &&
+          identical(attr(prev, "cache_fingerprint"), cache_fingerprint)) {
+        dec <- prev$decision; chosen <- prev$option; ps <- prev$p
+        cf <- prev$confidence; abst <- prev$abstained; errs <- prev$error
+        # a cached row counts as DONE only if it produced an answer (decided
+        # or policy-abstained). Rows whose previous attempt ERRORED at the
+        # transport/contract level (non-empty error) are re-run by default;
+        # option Rjif.cache_rerun_errors = FALSE keeps them cached instead.
+        rerun_err <- isTRUE(getOption("Rjif.cache_rerun_errors", TRUE))
+        done <- !is.na(abst)
+        filled <- done & (if (rerun_err) !nzchar(errs) else TRUE)
+        cache_resumed <- sum(filled)
+        # defensively repair any type-punned column from an odd cache file
+        dec <- as.logical(dec); ps <- as.numeric(ps); cf <- as.numeric(cf)
+        chosen <- as.character(chosen); abst <- as.logical(abst)
+        errs <- as.character(errs)
+        if (any(!done)) { abst[!done] <- NA; dec[!done] <- NA
+                          chosen[!done] <- NA_character_
+                          ps[!done] <- NA_real_; cf[!done] <- NA_real_ }
+      } else if (!is.null(prev)) {
+        warning("Rjif: cache file '", cache, "' exists but does not match this ",
+                "run (row count, frame shape, or question fingerprint); ",
+                "starting fresh and will overwrite it.", call. = FALSE)
+      }
+    }
+  }
 
   i <- 1L
   while (i <= n) {
     e <- min(n, i + batch - 1L)
+    # persist progress once per chunk (cheap: small data.frame)
+    if (!is.null(cache)) .cache_save(cache, dec, chosen, ps, cf, abst, errs,
+                                     q, n, cache_fingerprint)
     for (j in i:e) {
+      if (isTRUE(filled[[j]])) next   # resumed from cache
       st <- state_vec[[j]]
       if (is.na(st)) {
         dec[j] <- NA; abst[j] <- TRUE; errs[j] <- "state is NA"
@@ -239,25 +326,24 @@ jev_score_many <- function(state_vec, question, ...,
       p <- jprob(ans)
       ps[j] <- p
       cf[j] <- jconf(ans)
-      # undecided: no value at all (missing answer or contract violation),
-      # under the floor, or the floor was set but no probability exists to
-      # compare it against. Undecided means decision = NA, never FALSE (B2).
-      undecided <- is.na(v) ||
-        (confidence_floor > 0 && (is.na(p) || p < confidence_floor))
-      if (undecided) {
+      # identical policy to jif() via .decide_answer() (audit finding 3):
+      # two-sided noul window when floor > threshold, single-sided otherwise.
+      d <- .decide_answer(ans, q, threshold, confidence_floor)
+      if (is.na(d$dec)) {
         abst[j] <- TRUE
         dec[j] <- NA
         chosen[j] <- NA_character_
+        if (!is.na(d$reason)) errs[j] <- .clean_error_text(d$reason, 300L)
       } else {
         abst[j] <- FALSE
         if (q$type == "choice") {
-          chosen[j] <- v
+          chosen[j] <- as.character(d$dec)
           dec[j] <- TRUE   # a decided choice: 'option' carries the routing
         } else if (q$type == "noul") {
-          dec[j] <- (v >= threshold)
-          chosen[j] <- if (dec[[j]]) "true" else "false"
+          dec[j] <- d$dec
+          chosen[j] <- if (isTRUE(d$dec)) "true" else "false"
         } else {
-          dec[j] <- (v >= threshold)
+          dec[j] <- d$dec
           chosen[j] <- formatC(v, format = "f", digits = 3)
         }
       }
@@ -274,12 +360,41 @@ jev_score_many <- function(state_vec, question, ...,
       }
     }
     i <- e + 1L
+    # persist the chunk's results BEFORE advancing, so an interrupt (or a
+    # thrown outside error) between chunks loses at most one chunk of work
+    if (!is.null(cache)) .cache_save(cache, dec, chosen, ps, cf, abst, errs,
+                                     q, n, cache_fingerprint)
   }
   out <- data.frame(decision = dec, option = chosen, p = ps, confidence = cf,
                     abstained = abst, error = errs, stringsAsFactors = FALSE)
   attr(out, "question_type") <- q$type
   attr(out, "n_abstained") <- sum(abst)
+  if (!is.null(cache)) attr(out, "n_resumed") <- cache_resumed
   out
+}
+
+# Write a resumable jev_score_many() progress file. Saved WITHOUT row names
+# noise and with the fingerprint attr so a later run can verify compatibility.
+# Failure to write (disk full, read-only path, permissions) is a warning, not
+# an error: a cache is an optimization and must never lose the run's answers
+# that are already in memory.
+.cache_save <- function(cache, dec, chosen, ps, cf, abst, errs, q, n,
+                        fingerprint) {
+  df <- data.frame(decision = dec, option = chosen, p = ps, confidence = cf,
+                   abstained = abst, error = errs, stringsAsFactors = FALSE)
+  attr(df, "question_type") <- q$type
+  attr(df, "cache_fingerprint") <- fingerprint
+  tryCatch(saveRDS(df, cache),
+           error = function(e) {
+             if (!is.null(getOption("Rjif.cache_warn_seen", TRUE))) {
+               warning("Rjif: could not write cache file '", cache, "' (",
+                       .clean_error_text(conditionMessage(e), 120L),
+                       "); results still returned, but this run cannot resume.",
+                       call. = FALSE)
+               options(Rjif.cache_warn_seen = FALSE)  # once per session
+             }
+             invisible(NULL)
+           })
 }
 
 # ifelse-style verb with an explicit unknown lane. test is the value returned

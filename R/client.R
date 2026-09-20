@@ -21,6 +21,17 @@
 
 JEV_PRICE_PER_MTOK <- 0.042   # $/million input tokens; output tokens are free
 
+# Contract tolerances (external audit finding 4; rationale in the
+# jev_answer_valid header). The API sends probabilities rounded to 2 decimals
+# (live-verified 2026-09-19), so exact comparisons would reject valid answers:
+#   JEV_PROB_SUM_TOL  - |sum(probabilities) - 1| upper bound
+#   JEV_WINNER_TOL    - how far the chosen choice-option may trail the top
+#                       option before the answer is called self-contradictory
+#   JEV_WEIGHT_TOL    - |score - weighted mean of its distribution|
+JEV_PROB_SUM_TOL <- 0.01
+JEV_WINNER_TOL <- 0.02
+JEV_WEIGHT_TOL <- 0.05
+
 # Maximum characters of an API error body echoed back to the user. The body is
 # attacker/echo-controlled in principle, so it is bounded and scrubbed below.
 JEV_ERROR_BODY_LIMIT <- 240L
@@ -203,6 +214,24 @@ jev_key <- function() {
 # Returns list(value, probs, confidence, valid); when the answer violates the
 # contract, valid = FALSE with value/confidence forced NA, and reason explains
 # the violation (surfaced by jif_reason()/the batch error column).
+#
+# CONTRACT SOURCES (external audit finding 4, 2026-09-19; all live-verified
+# against the API the same evening):
+#   * choice answer: `choice` is "the highest-probability option", `confidence`
+#     required in [0,1], `probabilities` required over every option (docs
+#     https://docs.typesafe.ai/api). Winner consistency is enforced here with
+#     a tolerance that covers the API's 2-decimal probability rounding: the
+#     chosen option may not trail any offered option by more than 0.02.
+#   * score answer: `probabilities` and `legend` are REQUIRED and keyed by the
+#     same level-index strings ("0".."k-1"); confidence required in [0,1]. The
+#     score must agree with the probability-weighted mean of its own
+#     distribution (weighted mean of rounded values lands within ~0.015 of the
+#     reported score; tolerance 0.05).
+#   * noul answer: just {type, noul}; no confidence field is sent.
+# TOLERANCES: JEV_PROB_SUM_TOL (distribution normalisation, |sum-1|) and
+# JEV_WINNER_TOL (choice winner margin) and JEV_WEIGHT_TOL (score weighted
+# mean) are package constants, documented in the help pages, not magic numbers
+# inlined in tests.
 
 # Unwrap a JSON array that wraps exactly one scalar: ONLY an UNNAMED 1-element
 # list (that is what [] decodes to under simplifyVector = FALSE). A NAMED
@@ -358,9 +387,33 @@ jev_answer_valid <- function(ans, q) {
       return(invalid("probability names do not cover the offered options"))
     }
     s <- sum(vals)
-    if (abs(s - 1) > 0.01) {
+    if (abs(s - 1) > JEV_PROB_SUM_TOL) {
       return(invalid(paste0("probabilities sum to ", formatC(s, format = "f",
                                                              digits = 3), ", not ~1")))
+    }
+    # winner consistency (audit finding 4, probe 3: the old validator accepted
+    # choice='a' with probabilities a=.01 b=.99): the docs define `choice` as
+    # "the highest-probability option". The API rounds probabilities to 2
+    # decimals for display while argmax runs on unrounded values, so the chosen
+    # option may trail the displayed top by at most one rounding step
+    # (JEV_WINNER_TOL = 0.02); a larger gap is a self-contradictory answer.
+    # The 1e-9 guard is not paranoia: 0.51-0.49 evaluates to
+    # 0.020000000000000018 in binary floating point, so a bare `>` would
+    # reject the very boundary the tolerance documents as acceptable (found
+    # by the suite's own fixture, not by inspection).
+    # NOTE on the collision tests (R5-B1): pn was validated all-non-empty and
+    # all-distinct above, so match(v, pn) is a unique POSITION; subscript by
+    # index, never by name ([[ on a duplicated name picks the first).
+    gap <- max(vals) - vals[[match(v, pn)[[1L]]]]
+    if (gap > JEV_WINNER_TOL + 1e-9) {
+      return(invalid(paste0("chosen option '", v, "' trails the top option by ",
+                            formatC(gap, format = "f", digits = 3),
+                            " (> tolerance ", formatC(JEV_WINNER_TOL, format = "f",
+                                                      digits = 2), ")")))
+    }
+    if (is.na(conf_valid)) {
+      # `confidence` is required on choice answers per the API reference.
+      return(invalid("choice answer lacks a confidence in [0, 1]"))
     }
     probs <- stats::setNames(as.list(lapply(vals, function(x) x / s)), pn)
     return(list(value = v, probs = probs, confidence = conf_valid,
@@ -378,67 +431,150 @@ jev_answer_valid <- function(ans, q) {
   if (is.na(conf_valid)) {
     return(invalid("score answer lacks a confidence in [0, 1]"))
   }
-  # per-level distribution (docs example: score 1.05 with p = {0, .95, .05}).
-  # Keyed by level-index strings; names must cover 0..k-1 exactly.
-  sprob <- NULL
-  if (!is.null(ans[["probabilities"]])) {
-    pv <- ans[["probabilities"]]
-    pn <- names(pv)
-    vals <- .prob_vector_values(pv)
-    want <- as.character(seq_len(k) - 1L)
-    if (is.null(vals) || is.null(pn) || anyDuplicated(pn) ||
-        !setequal(pn, want) || anyNA(vals) || any(!is.finite(vals)) ||
-        any(vals < 0) || any(vals > 1)) {
-      return(invalid("score probability vector malformed (names, NA, or range)"))
-    }
-    s <- sum(vals)
-    if (abs(s - 1) > 0.01) {
-      return(invalid(paste0("score probabilities sum to ", formatC(s, format = "f",
-                                                                   digits = 3),
-                            ", not ~1")))
-    }
-    vals <- vals / s
-    vals <- vals[match(pn, names(vals))]
-    # trust but verify: the score must be the weighted mean of its own
-    # distribution. Legend keys are level indices as strings ("0".."k-1"),
-    # NOT 1-based (author bug found by the suite: an off-by-one here made
-    # every valid continuous score self-contradict by exactly 1.0).
-    # 0.05 tolerance covers 2-decimal rounding in the API.
-    wm <- sum(vals * as.integer(pn))
-    if (abs(wm - v) > 0.05) {
-      return(invalid(paste0("score ", formatC(v, format = "f", digits = 3),
-                            " contradicts its probability-weighted mean ",
-                            formatC(wm, format = "f", digits = 3))))
-    }
-    sprob <- stats::setNames(lapply(vals, function(x) x), pn)
+  # per-level distribution: REQUIRED on score answers (live docs 2026-09-19:
+  # score, legend, probabilities, confidence all "required"; external audit
+  # finding 4, probe 4 caught that this block was conditional, so a bare
+  # {score, confidence} response passed validation). Keyed by level-index
+  # strings; names must cover 0..k-1 exactly and match the legend keys.
+  if (is.null(ans[["probabilities"]])) {
+    return(invalid("score answer carries no probability distribution"))
   }
+  pv <- ans[["probabilities"]]
+  pn <- names(pv)
+  vals <- .prob_vector_values(pv)
+  want <- as.character(seq_len(k) - 1L)
+  if (is.null(vals) || is.null(pn) || anyDuplicated(pn) ||
+      !setequal(pn, want) || anyNA(vals) || any(!is.finite(vals)) ||
+      any(vals < 0) || any(vals > 1)) {
+    return(invalid("score probability vector malformed (names, NA, or range)"))
+  }
+  s <- sum(vals)
+  if (abs(s - 1) > JEV_PROB_SUM_TOL) {
+    return(invalid(paste0("score probabilities sum to ", formatC(s, format = "f",
+                                                                 digits = 3),
+                          ", not ~1")))
+  }
+  # legend required and its keys must cover the same level indices (docs
+  # "map<string,string>", keys matching probabilities). A missing or
+  # mis-keyed legend makes the answer uninterpretable.
+  if (is.null(ans[["legend"]])) {
+    return(invalid("score answer carries no legend"))
+  }
+  lg <- ans[["legend"]]
+  lgn <- names(lg)
+  if (is.null(lgn) || anyDuplicated(lgn) || !setequal(lgn, want)) {
+    return(invalid("score legend keys do not cover the level indices 0..k-1"))
+  }
+  vals <- vals / s
+  vals <- vals[match(pn, names(vals))]
+  # trust but verify: the score must be the weighted mean of its own
+  # distribution. Legend keys are level indices as strings ("0".."k-1"),
+  # NOT 1-based (author bug found by the suite: an off-by-one here made
+  # every valid continuous score self-contradict by exactly 1.0).
+  # JEV_WEIGHT_TOL covers the API's 2-decimal rounding of probabilities
+  # (live-verified: reported score is the mean of UNrounded values, so the
+  # weighted mean of the rounded ones lands within ~0.015; the docs' own
+  # example 0/0.95/0.05 -> 1.05 is exact).
+  wm <- sum(vals * as.integer(pn))
+  if (abs(wm - v) > JEV_WEIGHT_TOL) {
+    return(invalid(paste0("score ", formatC(v, format = "f", digits = 3),
+                          " contradicts its probability-weighted mean ",
+                          formatC(wm, format = "f", digits = 3))))
+  }
+  sprob <- stats::setNames(lapply(vals, function(x) x), pn)
   return(list(value = v, probs = sprob, confidence = conf_valid,
               valid = TRUE, reason = NA_character_))
 }
 
 # Default transport over httr. Returns the parsed response list.
+#
+# TIMEOUTS AND RETRIES (external audit finding 5, 2026-09-19): the vendor
+# documents 429 (rate limited) and 529 (overloaded) as retryable with
+# exponential backoff (https://docs.typesafe.ai/api#handling-rate-limits).
+# Policy implemented here:
+#   * hard per-request timeout (curl -m), so a hung socket cannot stall a
+#     5,000-row batch forever. Default 120s; option Rjif.timeout.
+#   * bounded retries with exponential backoff plus jitter for 429/529 and
+#     for transport-level errors (timeouts, DNS, connection refused), which
+#     may be transient. Defaults: 3 retries, base 1s, cap 30s; options
+#     Rjif.retries / Rjif.retry_base / Rjif.retry_cap.
+#   * a Retry-After header, when present and sane (numeric, <= the option
+#     Rjif.retry_max_wait default 120s), overrides the computed backoff.
+#   * 4xx responses OTHER than 429 (401/403/422) are never retried - a bad
+#     key or malformed body will not fix itself - and error immediately.
+#   * 5xx statuses other than 529 are treated the same way: a server error
+#     outside the documented retryable set is not guessed at. Only
+#     transport-class failures (timeout/DNS/refused/reset, surfacing as
+#     errors from httr rather than HTTP responses) and the two documented
+#     statuses retry.
+#   * the final error message reports how many attempts were made, because
+#     a timed-out attempt MAY still have been processed (and billed) by the
+#     vendor; we do not claim to know (same honesty rule as jev_usage()$calls).
+# Retries multiply the request count, never the usage counters: jev_usage()
+# counts decoded RESPONSES, so retried failures still count zero.
 .transport_httr <- function(body) {
   if (!requireNamespace("httr", quietly = TRUE) ||
       !requireNamespace("jsonlite", quietly = TRUE)) {
     stop("Rjif needs the 'httr' and 'jsonlite' packages.", call. = FALSE)
   }
-  resp <- httr::POST(jev_endpoint(),
-    httr::add_headers(Authorization = paste("Bearer", jev_key()),
-                      `Content-Type` = "application/json"),
-    body = jsonlite::toJSON(body, auto_unbox = TRUE, null = "null"),
-    encode = "raw")
-  status <- tryCatch(httr::status_code(resp), error = function(e) NA_integer_)
-  ok <- tryCatch(httr::http_status(resp)$category == "Success", error = function(e) FALSE)
+  timeout <- .positive_option("Rjif.timeout", 120)
+  max_retries <- .nonneg_int_option("Rjif.retries", 3L)
+  base <- .positive_option("Rjif.retry_base", 1)
+  cap <- .positive_option("Rjif.retry_cap", 30)
+  max_wait <- .positive_option("Rjif.retry_max_wait", 120)
+  attempt <- 0L
+  repeat {
+    attempt <- attempt + 1L
+    resp <- tryCatch(
+      httr::POST(jev_endpoint(),
+        httr::config(timeout = timeout),
+        httr::add_headers(Authorization = paste("Bearer", jev_key()),
+                          `Content-Type` = "application/json"),
+        body = jsonlite::toJSON(body, auto_unbox = TRUE, null = "null"),
+        encode = "raw"),
+      error = function(e) structure(list(msg = .clean_error_text(conditionMessage(e))),
+                                    class = "jev_transport_error"))
+    if (inherits(resp, "jev_transport_error")) {
+      # connection-level failure (timeout, DNS, refused, reset): retryable if
+      # attempts remain; the message is already scrubbed of anything key-like.
+      if (attempt <= max_retries) {
+        .retry_sleep(.backoff_wait(attempt, base, cap, NULL))
+        next
+      }
+      stop("Rjif: API call to ", jev_endpoint(), " failed after ", attempt,
+           " attempt(s): ", resp$msg,
+           call. = FALSE)
+    }
+    status <- tryCatch(httr::status_code(resp), error = function(e) NA_integer_)
+    ok <- tryCatch(httr::http_status(resp)$category == "Success",
+                   error = function(e) FALSE)
+    if (isTRUE(ok)) break
+    if ((identical(status, 429L) || identical(status, 529L)) &&
+        attempt <= max_retries) {
+      hdrs <- tryCatch(httr::headers(resp), error = function(e) list())
+      ra <- tryCatch(hdrs[["retry-after"]], error = function(e) NULL)
+      .retry_sleep(.backoff_wait(attempt, base, cap, ra, max_wait))
+      next
+    }
+    break   # non-retryable status, or attempts exhausted -> error below
+  }
+  status <- if (inherits(resp, "jev_transport_error")) NA_integer_ else
+    tryCatch(httr::status_code(resp), error = function(e) NA_integer_)
+  ok <- if (inherits(resp, "jev_transport_error")) FALSE else
+    tryCatch(httr::http_status(resp)$category == "Success", error = function(e) FALSE)
   if (!isTRUE(ok)) {
     # NOTE: never interpolate jev_key() or the request headers into this message.
     haltxt <- tryCatch(rawToChar(resp$content), error = function(e) "")
     if (!nzchar(haltxt)) haltxt <- tryCatch(httr::content(resp, "text", encoding = "UTF-8"),
                                            error = function(e) "")
     stop("Rjif: API call to ", jev_endpoint(), " failed (HTTP ",
-         if (is.na(status)) "?" else status, "): ",
+         if (is.na(status)) "?" else status, ")",
+         if (attempt > 1L) paste0(" after ", attempt, " attempts") else "", ": ",
          .clean_error_text(paste(haltxt, collapse = " ")),
         if (identical(status, 401L) || identical(status, 403L))
           " -- check TYPESAFE_API_KEY." else "",
+        if (identical(status, 429L) || identical(status, 529L))
+          " -- retries exhausted; the vendor may bill some attempts even when no answer arrived." else "",
         call. = FALSE)
   }
   txt <- tryCatch(rawToChar(resp$content), error = function(e) "")
@@ -451,14 +587,64 @@ jev_answer_valid <- function(ans, q) {
   out
 }
 
+# Backoff for attempt k (1-based): min(cap, base * 2^(k-1)) plus up to 25%
+# jitter, unless the vendor sent a usable Retry-After (delta-seconds form;
+# the HTTP-date form is not parsed - we fall back to computed backoff, which
+# is documented behavior). A Retry-After above Rjif.retry_max_wait is NOT
+# silently waited out: the caller's clock budget is the user's, so we cap.
+.backoff_wait <- function(attempt, base, cap, retry_after, max_wait = cap) {
+  ra <- suppressWarnings(as.numeric(retry_after))
+  computed <- min(cap, base * (2^(attempt - 1L)))
+  if (length(ra) == 1L && !is.na(ra) && ra >= 0) {
+    return(min(ra, max_wait))   # honour server hints inside the caller's budget
+  }
+  jitter <- computed * stats::runif(1, 0, 0.25)
+  min(cap, computed + jitter)
+}
+
+.retry_sleep <- function(seconds) {
+  Sys.sleep(max(0, min(seconds, 600)))  # absolute ceiling: never sleep 15min
+}
+
+.positive_option <- function(name, default) {
+  v <- suppressWarnings(as.numeric(getOption(name, default)))
+  if (length(v) != 1L || is.na(v) || v <= 0) default else v
+}
+.nonneg_int_option <- function(name, default) {
+  v <- suppressWarnings(as.integer(getOption(name, default)))
+  if (length(v) != 1L || is.na(v) || v < 0) default else v
+}
+
 # Question constructors -------------------------------------------------------
 
 # noul: "is this statement true of the state?" -> 0-1
-jev_noul_q <- function(instructions) {
-  structure(list(type = "noul", instructions = instructions), class = "jev_question")
+# Optional `criteria` (a named list/character vector with true = and/or
+# false = descriptions) clarifies what each outcome means; live API
+# https://docs.typesafe.ai/primitives/noul. Any other names are rejected:
+# a typo'd key would silently change what the model sees.
+jev_noul_q <- function(instructions, criteria = NULL) {
+  if (!is.null(criteria)) {
+    if (!(is.list(criteria) || is.character(criteria))) {
+      stop("Rjif: noul criteria must be a named list with 'true'/'false' ",
+           "descriptions (either or both).", call. = FALSE)
+    }
+    cn <- names(criteria)
+    if (is.null(cn) || !all(cn %in% c("true", "false")) || !any(nzchar(cn))) {
+      stop("Rjif: noul criteria names must be 'true' and/or 'false'; got: ",
+           .clean_error_text(paste(cn, collapse = ", ")), ".", call. = FALSE)
+    }
+    if (anyDuplicated(cn)) {
+      stop("Rjif: noul criteria must not repeat 'true'/'false'.", call. = FALSE)
+    }
+  }
+  structure(list(type = "noul", instructions = instructions,
+                 criteria = criteria), class = "jev_question")
 }
 
 # choice: route among named, described options -> one option + full distribution
+# API limit (live docs, external audit finding 4): at most 255 options.
+JEV_MAX_CHOICE_OPTIONS <- 255L
+JEV_SCORE_LEVEL_RANGE <- c(2L, 10L)   # "at least two levels; up to 10" (docs)
 jev_choice_q <- function(instructions, criteria) {
   if (!is.list(criteria) && !is.character(criteria)) {
     stop("Rjif: choice criteria must be a named list or character vector ",
@@ -467,6 +653,16 @@ jev_choice_q <- function(instructions, criteria) {
   nms <- names(criteria)
   if (is.null(nms) || any(!nzchar(nms))) {
     stop("Rjif: choice criteria must be a named list (option = description).",
+         call. = FALSE)
+  }
+  if (length(nms) < 2L) {
+    stop("Rjif: a Choice question needs at least 2 options, not ",
+         length(nms), ".", call. = FALSE)
+  }
+  if (length(nms) > JEV_MAX_CHOICE_OPTIONS) {
+    stop("Rjif: choice criteria has ", length(nms), " options; the API allows ",
+         JEV_MAX_CHOICE_OPTIONS, ". Classify a large taxonomy level by level ",
+         "(chained Choice questions) instead of one giant option list.",
          call. = FALSE)
   }
   if (anyDuplicated(nms)) {
@@ -499,6 +695,19 @@ jev_score_q <- function(instructions, criteria) {
     stop("Rjif: score criteria must be a non-empty character vector of ordered ",
          "level descriptions.", call. = FALSE)
   }
+  # API level-count limits (docs: "at least two levels; the API accepts up to
+  # 10"; external audit finding 4: a 1-level rubric also serialized as a JSON
+  # scalar string via auto_unbox, which the API cannot read as an array).
+  if (length(crit) < JEV_SCORE_LEVEL_RANGE[[1L]]) {
+    stop("Rjif: a Score question needs at least ", JEV_SCORE_LEVEL_RANGE[[1L]],
+         " levels, not ", length(crit),
+         ". A yes/no judgment is a Noul question.", call. = FALSE)
+  }
+  if (length(crit) > JEV_SCORE_LEVEL_RANGE[[2L]]) {
+    stop("Rjif: score criteria has ", length(crit), " levels; the API allows ",
+         JEV_SCORE_LEVEL_RANGE[[2L]], ". Coarser rubrics calibrate better ",
+         "anyway - merge adjacent levels.", call. = FALSE)
+  }
   if (is.character(crit) && (any(!nzchar(crit)) || any(is.na(crit)))) {
     stop("Rjif: score criteria may not contain empty or NA level descriptions.",
          call. = FALSE)
@@ -526,13 +735,18 @@ jev_score_q <- function(instructions, criteria) {
 # jev_eval(state = <character>, questions = list(a = jev_noul_q(...), ...))
 # returns a 'jev_answers' list, one entry per question, in the same order.
 jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-latest")) {
-  # The API accepts exactly ONE state per call. A vector here used to be
-  # silently truncated to its first element (audit M2): reject it and point
-  # callers at jev_score_many(), which loops properly.
-  if (!is.character(state) || length(state) != 1L || is.na(state)) {
-    stop("Rjif: state must be a single non-NA string",
+  # The API accepts exactly ONE state per call: a string, or structured data
+  # (object/array per https://docs.typesafe.ai/api#param-state; live-verified
+  # 2026-09-19 with a nested list state). A character VECTOR is still rejected:
+  # it used to be silently truncated to its first element (audit M2), and one
+  # call must not mean many states. For vectors use jev_score_many().
+  state_ok <- (is.character(state) && length(state) == 1L && !is.na(state)) ||
+    (is.list(state) && length(state) > 0L)
+  if (!state_ok) {
+    stop("Rjif: state must be a single non-NA string or a non-empty list ",
+         "(structured state: records, chat logs, nested fields)",
          if (is.character(state) && length(state) > 1L)
-           paste0(" (got ", length(state), "; use jev_score_many() for vectors)")
+           paste0(" (got a length-", length(state), " character vector; use jev_score_many() for vectors)")
          else ".",
          call. = FALSE)
   }

@@ -26,8 +26,10 @@
 #   * Reliability is only meaningful against *gold* truth. If "truth" came from
 #     another model, you have agreement, not calibration.
 
-reliability_curve <- function(df, p = "p", truth = "truth", n_bins = 10L) {
+reliability_curve <- function(df, p = "p", truth = "truth", n_bins = 10L,
+                              allow_type = NULL) {
   .check_df_cols(df, p, truth)
+  .check_probability_semantics(df, allow_type)
   n_bins <- .as_pos_int(n_bins, "n_bins")
   # Factor probability columns store small integers (1, 2, ...) with pretty
   # labels ("0.1", "0.9"): as.numeric() on the factor would read the storage
@@ -62,8 +64,16 @@ reliability_curve <- function(df, p = "p", truth = "truth", n_bins = 10L) {
     bin      = lv,
     n        = as.integer(counts),
     mean_p   = ifelse(counts > 0, as.numeric(sums_p) / pmax(counts, 1L), NA_real_),
-    accuracy = ifelse(counts > 0, as.numeric(sums_t) / pmax(counts, 1L), NA_real_),
+    observed_rate = ifelse(counts > 0, as.numeric(sums_t) / pmax(counts, 1L), NA_real_),
     stringsAsFactors = FALSE, row.names = NULL)
+  # COLUMN RENAMED `accuracy` -> `observed_rate` (versioned change, external
+  # audit finding 2): "accuracy" misleads at low prevalence - a bin where the
+  # event never occurs shows "accuracy 0.00" next to a perfectly calibrated
+  # mean_p of 0.07, and statisticians reasonably read 0.00 as a failure rate.
+  # This is a BREAKING rename, honest about being one: df$accuracy is NULL
+  # from here on (an attribute alias would be worse: data.frame $ never sees
+  # attributes, so it would pretend to work and return NULL anyway). Update
+  # readers to observed_rate; the semantics were always the event frequency.
   attr(out, "n_used") <- length(pv)
   attr(out, "n_dropped") <- list(p_na = cnt_p_na, truth_na = cnt_t_na,
                                  out_of_range = cnt_oor,
@@ -75,15 +85,16 @@ reliability_curve <- function(df, p = "p", truth = "truth", n_bins = 10L) {
   out
 }
 
-# Expected calibration error: sample-weighted mean |accuracy - mean_p| over
-# occupied bins. Returns 0 only when every occupied bin is perfectly calibrated
-# (an empty curve returns NA with a warning, not a flattering 0).
+# Expected calibration error: sample-weighted mean |observed_rate - mean_p|
+# over occupied bins. Returns 0 only when every occupied bin is perfectly
+# calibrated (an empty curve returns NA with a warning, not a flattering 0).
 # Caveat that cannot live in a scalar: ECE=0 on 1 usable row of 100 is
 # arithmetically true and operationally meaningless, so ece() warns whenever
 # fewer than 30 rows survive the drop filters (attr-free disclosure for a
 # numeric return; use reliability_curve() for the full accounting).
-ece <- function(df, p = "p", truth = "truth", n_bins = 10L) {
-  rc <- reliability_curve(df, p, truth, n_bins)
+ece <- function(df, p = "p", truth = "truth", n_bins = 10L,
+                allow_type = NULL) {
+  rc <- reliability_curve(df, p, truth, n_bins, allow_type = allow_type)
   if (!any(rc$n > 0L)) {
     warning("Rjif: ece() had no scored rows in range [0,1]; returning NA.",
             call. = FALSE)
@@ -97,7 +108,7 @@ ece <- function(df, p = "p", truth = "truth", n_bins = 10L) {
             call. = FALSE)
   }
   occ <- rc$n > 0L
-  sum(rc$n[occ] / sum(rc$n[occ]) * abs(rc$accuracy[occ] - rc$mean_p[occ]))
+  sum(rc$n[occ] / sum(rc$n[occ]) * abs(rc$observed_rate[occ] - rc$mean_p[occ]))
 }
 
 # Selection curve: as you raise the confidence floor, what happens to coverage
@@ -117,8 +128,9 @@ ece <- function(df, p = "p", truth = "truth", n_bins = 10L) {
 # this floor?". Rows you could not score at all are excluded from the
 # denominator; attr(, "n_usable") tells you how big that denominator is.
 selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
-                            p = "p", truth = "truth") {
+                            p = "p", truth = "truth", allow_type = NULL) {
   .check_df_cols(df, p, truth)
+  .check_probability_semantics(df, allow_type)
   if (!is.numeric(floor_seq) || !length(floor_seq)) {
     stop("Rjif: floor_seq must be a non-empty numeric vector.", call. = FALSE)
   }
@@ -156,6 +168,48 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
 }
 
 # --- internals ----------------------------------------------------------------
+
+# Probability-semantics gate (external audit finding 2, 2026-09-19).
+# A batch data frame from jev_score_many() carries attr(, "question_type"),
+# and its `p` column means different things per type:
+#   noul   -> P(assertion true). An event probability. Calibration-valid.
+#   choice -> P(chosen option). A selected-class confidence; calibration of
+#             P(correct class) is a different object than P(event), so it is
+#             allowed only with an explicit allow_type = "choice".
+#   score  -> the vendor confidence: distribution CONCENTRATION, not the
+#             probability of anything positive. Probe 5's damning case: 30
+#             rows, all-negative truth, decisions all correct, score
+#             confidence 1 -> ECE = 1.0 "catastrophic miscalibration" that
+#             is really arithmetic on the wrong quantity. By default we
+#             REFUSE and tell the user what to pass instead;
+#             allow_type = "score" remains an explicit, warned opt-out for
+#             anyone who genuinely wants concentration-vs-outcome curves.
+.check_probability_semantics <- function(df, allow_type = NULL) {
+  qt <- attr(df, "question_type")
+  if (is.null(qt)) return(invisible(TRUE))   # hand-built frame: user's contract
+  qt <- as.character(qt[[1L]])
+  if (identical(qt, "noul")) return(invisible(TRUE))
+  if (qt %in% allow_type) {
+    if (qt == "score") {
+      warning("Rjif: `p` here is the vendor confidence (distribution ",
+              "concentration), not an event probability. A reliability curve on ",
+              "it answers 'how well does concentration predict the outcome?' ",
+              "- which is usually not calibration. Quote it as such.",
+              call. = FALSE)
+    }
+    return(invisible(TRUE))
+  }
+  stop("Rjif: this batch's question_type is '", qt, "' and its `p` column is ",
+       switch(qt,
+         score = "the vendor confidence (how concentrated the level distribution is), NOT a probability of the event",
+         choice = "the probability of the SELECTED option, not of a binary event",
+         "not an event probability"),
+       ". reliability_curve()/ece() measure event-probability calibration. ",
+       "For a binary event probability use a noul question; to proceed anyway ",
+       "(knowing the curve is not calibration in the usual sense) pass ",
+       "allow_type = '", qt, "'.",
+       call. = FALSE)
+}
 
 .check_df_cols <- function(df, p, truth) {
   if (!is.data.frame(df)) stop("Rjif: expected a data.frame.", call. = FALSE)
