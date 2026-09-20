@@ -70,8 +70,16 @@ jif_reason(x)
   name matches the chosen option, or \code{unknown} if no branch name matches
   (a routing decision never falls through to the wrong arm); an unmatched
   string with plain scalars for \code{yes}/\code{no} returns \code{yes}. For
-  TRUE/FALSE tests it returns \code{yes} or \code{no}. Only the selected arm
-  is evaluated.
+  TRUE/FALSE tests it returns \code{yes} or \code{no}.
+  Exactly one branch expression is evaluated when arms are written as literal
+  \code{list(...)} or \code{c(...)} calls: the labels are read without
+  evaluation and only the winning element runs, so side effects (issuing a
+  label, paging someone) in losing branches never fire. An arm supplied as a
+  pre-built variable was already evaluated by the caller and is routed by
+  value. Any other arm expression (for example \code{setNames(...)}) is
+  forced when its labels are inspected, with the same side-effect caveat the
+  old code had: write branch arms as literal \code{list()}/\code{c()} calls,
+  or build them into a variable first, to keep routing lazy.
 
   \code{jif_abstained()} returns a single logical; TRUE also covers a bare
   \code{NA}. \code{jif_reason()} returns the abstention reason string, or

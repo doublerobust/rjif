@@ -150,6 +150,37 @@ expect("j_ifelse() with named branches sends an unmatched option to unknown",
        identical(j_ifelse("nothing_matching", c(returns = "label"), "no", "unknown"),
                  "unknown"))
 
+# --- arm laziness regression (external audit 2026-09-19: names(yes) used to
+# FORCE both arms; only the routed arm's winning element may ever evaluate)
+lazy_hits <- new.env()
+lazy_route <- j_ifelse(choice_dec,
+                       yes = list(returns = { lazy_hits$y <- 1; "label" },
+                                  quality_control = { lazy_hits$q <- 1; "defect" },
+                                  human_agent = { lazy_hits$h <- 1; "human" }),
+                       no = "ignore", unknown = "escalate")
+expect("j_ifelse() evaluates the routed branch", nzchar(as.character(lazy_route)))
+expect("j_ifelse() does NOT evaluate losing branches in the winning arm",
+       { hitn <- sum(c(!is.null(lazy_hits$y), !is.null(lazy_hits$q),
+                       !is.null(lazy_hits$h)))
+         hitn == 1L &&
+           switch(as.character(lazy_route), label = !is.null(lazy_hits$y),
+                  defect = !is.null(lazy_hits$q), human = !is.null(lazy_hits$h),
+                  FALSE) })
+lazy_hits2 <- new.env()
+invisible(j_ifelse("no_such_option",
+                   yes = list(returns = { lazy_hits2$y <- 1; "label" }),
+                   no = list(beta = { lazy_hits2$b <- 1; "B" }),
+                   unknown = { lazy_hits2$u <- 1; "escalate" }))
+expect("j_ifelse() no-match evaluates ONLY the unknown lane",
+       is.null(lazy_hits2$y) && is.null(lazy_hits2$b) && !is.null(lazy_hits2$u))
+lazy_hits3 <- new.env()
+invisible(j_ifelse("beta",
+                   yes = list(alpha = { lazy_hits3$a <- 1; "A" }),
+                   no = list(beta = { lazy_hits3$b <- 1; "B" }),
+                   unknown = "U"))
+expect("j_ifelse() routing to the no-arm never evaluates the yes-arm",
+       is.null(lazy_hits3$a) && !is.null(lazy_hits3$b))
+
 cat("\n3. jev_score_many() over a mini eCRF corpus\n")
 df <- jev_score_many(narratives, Q_SAE)
 expect("one row per input, same order", identical(nrow(df), length(narratives)))

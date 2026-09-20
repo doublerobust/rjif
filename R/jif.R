@@ -285,6 +285,18 @@ jev_score_many <- function(state_vec, question, ...,
 # ifelse-style verb with an explicit unknown lane. test is the value returned
 # by jif(); the abstention attribute is checked first, then a bare NA, so an
 # undecided judgment can never leak into 'yes' or 'no'.
+#
+# ARM EVALUATION (external audit, 2026-09-19): `yes`/`no` are promises. The
+# old routing called names(yes) to find branch labels, which FORCED the whole
+# arm - a side-effecting branch (issue the refund label, page the on-call)
+# could run even when routing went to the other side. Routing below uses
+# substitute() to read the caller's EXPRESSION: a literal list(...)/c(...)
+# yields its tags without evaluating anything, and only the winning element
+# is then evaluated, in the caller's frame. Arms passed as pre-built
+# variables cannot be inspected without forcing, and cannot be inspected at
+# all this way - they fall back to value-based routing (identical behavior to
+# the old code for those inputs; a variable's side effects already ran when
+# the caller built it, so forcing it here adds none).
 j_ifelse <- function(test, yes, no, unknown = NA) {
   if (isTRUE(jif_abstained(test))) return(unknown)
   if (length(test) != 1L) {
@@ -293,16 +305,55 @@ j_ifelse <- function(test, yes, no, unknown = NA) {
   }
   if (is.na(test)) return(unknown)
   if (is.character(test)) {
-    # a choice jif() returned an option name: if the caller named its branches,
-    # route by option; otherwise the option name is a truthy pick -> 'yes'
-    ny <- names(yes)
-    if (!is.null(ny) && test %in% ny) return(yes[[test]])
-    nn <- names(no)
-    if (!is.null(nn) && test %in% nn) return(no[[test]])
-    if (!is.null(ny) || !is.null(nn)) return(unknown)  # named branches, no match
-    return(yes)
+    env <- parent.frame()
+    yx <- substitute(yes)
+    nx <- substitute(no)
+    yt <- .arm_tags(yx)
+    nt <- .arm_tags(nx)
+    # literal named arms: route by expression tags, evaluating ONLY the winner
+    if (!is.null(yt) && test %in% yt) return(.arm_elt(yx, test, env))
+    if (!is.null(nt) && test %in% nt) return(.arm_elt(nx, test, env))
+    if (!is.null(yt) || !is.null(nt)) return(unknown)  # literal branches, no match
+    # no literal named arms: fall back to value-based routing (the old path).
+    if (missing(yes)) stop("Rjif: j_ifelse(): 'yes' is missing.", call. = FALSE)
+    yv <- eval(yx, env)
+    yn <- names(yv)
+    if (!is.null(yn) && test %in% yn) return(yv[[test]])
+    nv <- if (missing(no)) NULL else eval(nx, env)
+    nn <- names(nv)
+    if (!is.null(nn) && test %in% nn) return(nv[[test]])
+    if (!is.null(yn) || !is.null(nn)) return(unknown)  # named arms, no match
+    return(yv)  # plain scalars: an option name is a truthy pick -> yes
   }
   if (isTRUE(test)) yes else no
+}
+
+# Internal NSE helpers for j_ifelse(). .arm_tags() returns the branch labels
+# of a LITERAL, LABELED list(...)/c(...) call without evaluating it, else NULL
+# (scalars and UNLABEDED lists are not branch maps -> value-based fallback).
+.arm_tags <- function(expr) {
+  if (!is.call(expr)) return(NULL)
+  fn <- expr[[1L]]
+  if (!(is.name(fn) && as.character(fn) %in% c("list", "c"))) return(NULL)
+  tags <- names(as.list(expr[-1L]))
+  # unnamed elements of a call's arg list carry "", never NA (no stats dep)
+  if (length(tags) == 0L || all(tags == "")) NULL else tags
+}
+
+# Evaluate exactly one labeled element of a literal arm expression, in the
+# caller's frame (the environment j_ifelse() was called from). Elements are
+# expressions; only the winner's is ever evaluated.
+.arm_elt <- function(expr, which, env) {
+  elements <- as.list(expr[-1L])
+  tags <- names(elements)
+  if (is.null(tags)) tags <- character(length(elements))
+  names(elements) <- tags
+  idx <- which(!is.na(tags) & tags == which)
+  if (!length(idx)) {  # defensive: tags said yes, extraction disagrees
+    stop("Rjif: j_ifelse(): branch '", which, "' vanished from its arm.",
+         call. = FALSE)
+  }
+  eval(elements[[idx[[1L]]]], env)
 }
 
 # jmatch: route a state among description-matched branches.
