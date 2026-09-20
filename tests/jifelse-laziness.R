@@ -57,6 +57,31 @@ pre <- list(returns = "label", quality_control = "defect")  # already evaluated
 expect("pre-built variable arms still route by value",
        identical(j_ifelse(mk("returns"), pre, NA_character_, "human"), "label"))
 
+# --- mixed literal/prebuilt maps (external audit r2 finding 1, 2026-09-20):
+# the laziness fix checked ALL literal tags before any prebuilt arm, so a
+# prebuilt match returned unknown when the other side was a literal, and a
+# literal `no` could beat a matching prebuilt `yes`. Codex's exact fixtures:
+yes_map <- list(a = "YES_A")
+no_map <- list(b = "NO_B")
+expect("r2-1a: prebuilt yes + literal no, yes-match routes YES_A (was UNKNOWN)",
+       identical(j_ifelse(mk("a"), yes_map, list(b = "NO_B"), "UNKNOWN"), "YES_A"))
+expect("r2-1b: literal yes + prebuilt no, no-match routes NO_B (was UNKNOWN)",
+       identical(j_ifelse(mk("b"), list(a = "YES_A"), no_map, "UNKNOWN"), "NO_B"))
+expect("r2-1c: prebuilt yes + literal no both claim 'a' -> YES wins (was NO_A)",
+       identical(j_ifelse(mk("a"), yes_map, list(a = "NO_A"), "UNKNOWN"), "YES_A"))
+# the same shapes with side-effect probes: yes-precedence must not force the
+# losing side's elements
+ev4 <- new.env()
+r4 <- j_ifelse(mk("a"), yes_map,
+               list(a = { ev4$loser <- 1; "NO_A" }, b = { ev4$b <- 1; "NO_B" }),
+               "UNKNOWN")
+expect("r2-1d: yes-precedence with literal no-eval still evaluates no element",
+       identical(r4, "YES_A") && is.null(ev4$loser) && is.null(ev4$b))
+evm <- new.env()
+r5 <- j_ifelse(mk("z"), list(a = { evm$y <- 1; "A" }), no_map, "U")
+expect("r2-1e: no-match across mixed representations -> unknown, literal loser unevaluated",
+       identical(r5, "U") && is.null(evm$y))
+
 # --- boolean path unchanged
 expect("TRUE -> yes", identical(j_ifelse(TRUE, "y", "n"), "y"))
 expect("FALSE -> no", identical(j_ifelse(FALSE, "y", "n"), "n"))

@@ -420,20 +420,37 @@ j_ifelse <- function(test, yes, no, unknown = NA) {
     nx <- substitute(no)
     yt <- .arm_tags(yx)
     nt <- .arm_tags(nx)
-    # literal named arms: route by expression tags, evaluating ONLY the winner
-    if (!is.null(yt) && test %in% yt) return(.arm_elt(yx, test, env))
-    if (!is.null(nt) && test %in% nt) return(.arm_elt(nx, test, env))
-    if (!is.null(yt) || !is.null(nt)) return(unknown)  # literal branches, no match
-    # no literal named arms: fall back to value-based routing (the old path).
+    # Route YES before NO (external audit r2 finding 1): the old code checked
+    # all literal tags first, so a literal `no` map could win over a matching
+    # prebuilt `yes` map (j_ifelse("a", yes_map, list(a = "NO_A")) returned
+    # NO_A), and a prebuilt match was never consulted when any arm was a
+    # literal (mixed-map calls routed to unknown). Each side is now probed in
+    # its supported representation, YES first: literal expression tags (zero
+    # evaluation of the loser -- the laziness guarantee stands), then, if a
+    # side has no literal tags, its evaluated value's names (a variable's
+    # side effects already ran when the caller built it, so forcing adds
+    # none). 'any map' (literal or named-value) selects the unknown lane on
+    # no match; plain scalars keep the truthy-yes rule.
+    y_named <- nx_named <- NULL
+    if (!is.null(yt)) {
+      if (test %in% yt) return(.arm_elt(yx, test, env))
+    } else if (!missing(yes)) {
+      yv <- eval(yx, env); y_named <- names(yv)
+      if (!is.null(y_named) && test %in% y_named) return(yv[[test]])
+    }
+    if (!is.null(nt)) {
+      if (test %in% nt) return(.arm_elt(nx, test, env))
+    } else if (!missing(no)) {
+      nv <- eval(nx, env); nx_named <- names(nv)
+      if (!is.null(nx_named) && test %in% nx_named) return(nv[[test]])
+    }
+    if (!is.null(yt) || !is.null(nt) || !is.null(y_named) || !is.null(nx_named))
+      return(unknown)  # named arms on at least one side, no match anywhere
     if (missing(yes)) stop("Rjif: j_ifelse(): 'yes' is missing.", call. = FALSE)
-    yv <- eval(yx, env)
-    yn <- names(yv)
-    if (!is.null(yn) && test %in% yn) return(yv[[test]])
-    nv <- if (missing(no)) NULL else eval(nx, env)
-    nn <- names(nv)
-    if (!is.null(nn) && test %in% nn) return(nv[[test]])
-    if (!is.null(yn) || !is.null(nn)) return(unknown)  # named arms, no match
-    return(yv)  # plain scalars: an option name is a truthy pick -> yes
+    # Reached only when NEITHER side is any kind of named map (else the guard
+    # above returned unknown), so yv is the caller's evaluated scalar `yes`:
+    # an option name with no matching map is a truthy pick -> yes.
+    return(yv)
   }
   if (isTRUE(test)) yes else no
 }
