@@ -234,25 +234,16 @@ jev_score_many <- function(state_vec, question, ...,
   batch <- suppressWarnings(as.integer(batch))
   if (length(batch) != 1L || is.na(batch) || batch < 1L) batch <- 16L
 
-  # RESUMABLE BULK EXECUTION (external audit finding 5): with cache = <path>,
-  # completed rows are persisted after each batch and reloaded on start, so an
-  # interrupted 5,000-row run continues where it stopped instead of re-billing
-  # everything. Keying is BY ROW INDEX plus a question fingerprint: the cache
-  # is only honoured when the same file was written for the same question
-  # text and the same n; states are matched by position, so do not reorder
-  # state_vec between runs of one cache file (documented). Rows whose previous
-  # attempt ERRORED (non-empty error column) are re-run by default; set
-  # option Rjif.cache_rerun_errors = FALSE to keep error rows cached too.
-  # The cache file is a serialized R object on YOUR disk: it contains the API
-  # answers, so protect it like your data, and note the package cannot
-  # de-identify your narratives - they are in the file's row order, not in it
-  # verbatim (states are not stored), but answers + order can disclose a lot.
+  # Cache identity includes the full question, requested model, row count,
+  # and decision policy. States are positional and are deliberately not stored.
+  # Keep the input vector unchanged when reusing a cache path.
   cache_resumed <- 0L
-  cache_fingerprint <- paste0(q$type, ":",
-    substr(as.character(paste(unlist(q$instructions, use.names = FALSE),
-                              collapse = " ")), 1L, 200L))
+  cache_fingerprint <- serialize(list(version = 2L, question = unclass(q),
+    model = model, n = n, threshold = threshold, floor = confidence_floor),
+    NULL, version = 2)
   dec <- rep(NA, n); ps <- rep(NA_real_, n); cf <- rep(NA_real_, n)
   chosen <- rep(NA_character_, n); abst <- rep(NA, n); errs <- rep("", n)
+  failed <- rep(FALSE, n)
   filled <- rep(FALSE, n)
   if (!is.null(cache)) {
     if (!is.character(cache) || length(cache) != 1L || is.na(cache) ||
@@ -266,28 +257,16 @@ jev_score_many <- function(state_vec, question, ...,
                 "); starting fresh.", call. = FALSE)
         NULL
       })
-      if (is.data.frame(prev) && nrow(prev) == n &&
-          identical(attr(prev, "cache_fingerprint"), cache_fingerprint)) {
+      if (.cache_valid(prev, n, cache_fingerprint)) {
         dec <- prev$decision; chosen <- prev$option; ps <- prev$p
         cf <- prev$confidence; abst <- prev$abstained; errs <- prev$error
-        # a cached row counts as DONE only if it produced an answer (decided
-        # or policy-abstained). Rows whose previous attempt ERRORED at the
-        # transport/contract level (non-empty error) are re-run by default;
-        # option Rjif.cache_rerun_errors = FALSE keeps them cached instead.
+        failed <- attr(prev, "row_failed", exact = TRUE)
         rerun_err <- isTRUE(getOption("Rjif.cache_rerun_errors", TRUE))
-        done <- !is.na(abst)
-        filled <- done & (if (rerun_err) !nzchar(errs) else TRUE)
+        filled <- !is.na(abst) & (if (rerun_err) !failed else TRUE)
         cache_resumed <- sum(filled)
-        # defensively repair any type-punned column from an odd cache file
-        dec <- as.logical(dec); ps <- as.numeric(ps); cf <- as.numeric(cf)
-        chosen <- as.character(chosen); abst <- as.logical(abst)
-        errs <- as.character(errs)
-        if (any(!done)) { abst[!done] <- NA; dec[!done] <- NA
-                          chosen[!done] <- NA_character_
-                          ps[!done] <- NA_real_; cf[!done] <- NA_real_ }
       } else if (!is.null(prev)) {
         warning("Rjif: cache file '", cache, "' exists but does not match this ",
-                "run (row count, frame shape, or question fingerprint); ",
+                "run (row count, frame shape, question, model, or decision policy); ",
                 "starting fresh and will overwrite it.", call. = FALSE)
       }
     }
@@ -296,14 +275,15 @@ jev_score_many <- function(state_vec, question, ...,
   i <- 1L
   while (i <= n) {
     e <- min(n, i + batch - 1L)
-    # persist progress once per chunk (cheap: small data.frame)
-    if (!is.null(cache)) .cache_save(cache, dec, chosen, ps, cf, abst, errs,
-                                     q, n, cache_fingerprint)
     for (j in i:e) {
       if (isTRUE(filled[[j]])) next   # resumed from cache
+      # A new attempt must replace every field, including stale diagnostics.
+      dec[j] <- NA; chosen[j] <- NA_character_; ps[j] <- cf[j] <- NA_real_
+      abst[j] <- NA; errs[j] <- ""; failed[j] <- FALSE
       st <- state_vec[[j]]
       if (is.na(st)) {
         dec[j] <- NA; abst[j] <- TRUE; errs[j] <- "state is NA"
+        failed[j] <- TRUE
         next
       }
       # jev_eval can warn (contract violation) as well as throw; capture both.
@@ -317,7 +297,7 @@ jev_score_many <- function(state_vec, question, ...,
           invokeRestart("muffleWarning")
         })
       if (inherits(ans, "jev_row_error")) {
-        dec[j] <- NA; abst[j] <- TRUE
+        dec[j] <- NA; abst[j] <- TRUE; failed[j] <- TRUE
         errs[j] <- .clean_error_text(ans$msg, 300L)
         next
       }
@@ -351,6 +331,7 @@ jev_score_many <- function(state_vec, question, ...,
       # column. .clean_error_text redacts the real API key before persisting.
       note <- ans[["contract"]]
       if (!is.null(note) && !is.na(note) && nzchar(note)) {
+        failed[j] <- TRUE
         errs[j] <- .clean_error_text(
           paste(c(paste0("invalid API answer: ", note), warns), collapse = "; "),
           300L)
@@ -362,7 +343,7 @@ jev_score_many <- function(state_vec, question, ...,
     # persist the chunk's results BEFORE advancing, so an interrupt (or a
     # thrown outside error) between chunks loses at most one chunk of work
     if (!is.null(cache)) .cache_save(cache, dec, chosen, ps, cf, abst, errs,
-                                     q, n, cache_fingerprint)
+                                     q, failed, cache_fingerprint)
   }
   out <- data.frame(decision = dec, option = chosen, p = ps, confidence = cf,
                     abstained = abst, error = errs, stringsAsFactors = FALSE)
@@ -377,23 +358,38 @@ jev_score_many <- function(state_vec, question, ...,
 # Failure to write (disk full, read-only path, permissions) is a warning, not
 # an error: a cache is an optimization and must never lose the run's answers
 # that are already in memory.
-.cache_save <- function(cache, dec, chosen, ps, cf, abst, errs, q, n,
+.cache_valid <- function(df, n, fingerprint) {
+  cols <- c("decision", "option", "p", "confidence", "abstained", "error")
+  if (!is.data.frame(df) || nrow(df) != n || !identical(names(df), cols) ||
+      !identical(attr(df, "cache_fingerprint", exact = TRUE), fingerprint)) return(FALSE)
+  failed <- attr(df, "row_failed", exact = TRUE)
+  is.logical(df$decision) && is.character(df$option) && is.numeric(df$p) &&
+    is.numeric(df$confidence) && is.logical(df$abstained) &&
+    is.character(df$error) && !anyNA(df$error) &&
+    is.logical(failed) && length(failed) == n && !anyNA(failed)
+}
+
+.cache_save <- function(cache, dec, chosen, ps, cf, abst, errs, q, failed,
                         fingerprint) {
   df <- data.frame(decision = dec, option = chosen, p = ps, confidence = cf,
                    abstained = abst, error = errs, stringsAsFactors = FALSE)
   attr(df, "question_type") <- q$type
   attr(df, "cache_fingerprint") <- fingerprint
-  tryCatch(saveRDS(df, cache),
-           error = function(e) {
-             if (!is.null(getOption("Rjif.cache_warn_seen", TRUE))) {
-               warning("Rjif: could not write cache file '", cache, "' (",
-                       .clean_error_text(conditionMessage(e), 120L),
-                       "); results still returned, but this run cannot resume.",
-                       call. = FALSE)
-               options(Rjif.cache_warn_seen = FALSE)  # once per session
-             }
-             invisible(NULL)
-           })
+  attr(df, "row_failed") <- failed
+  # Write alongside the target and rename only after serialization finishes.
+  # An interrupt or failed write must not truncate the last completed chunk.
+  tmp <- tempfile(pattern = ".rjif-cache-", tmpdir = dirname(cache))
+  on.exit(unlink(tmp), add = TRUE)
+  tryCatch({
+    saveRDS(df, tmp)
+    if (!file.rename(tmp, cache)) stop("could not replace cache file")
+  }, error = function(e) {
+    warning("Rjif: could not write cache file '", cache, "' (",
+            .clean_error_text(conditionMessage(e), 120L),
+            "); results still returned, but this chunk was not saved.",
+            call. = FALSE)
+    invisible(NULL)
+  })
 }
 
 # ifelse-style verb with an explicit unknown lane. test is the value returned
