@@ -224,6 +224,12 @@ if (.Platform$OS.type != "windows" && requireNamespace("httpuv", quietly = TRUE)
       if (path %in% c("/429", "/529") && n == 1L) {
         status <- as.integer(sub("/", "", path)); headers[["Retry-After"]] <- "1"
       }
+      if (path %in% c("/date", "/capped") && n == 1L) {
+        status <- 429L
+        Sys.setlocale("LC_TIME", "C")
+        headers[["Retry-After"]] <- if (path == "/capped") "99" else
+          format(Sys.time() + 60, "%a, %d %b %Y %H:%M:%S GMT", tz = "GMT")
+      }
       if (path %in% c("/401", "/403", "/404", "/422", "/500", "/always429"))
         status <- if (path == "/always429") 429L else as.integer(sub("/", "", path))
       if (path == "/timeout") Sys.sleep(1)
@@ -242,9 +248,9 @@ if (.Platform$OS.type != "windows" && requireNamespace("httpuv", quietly = TRUE)
   Sys.setenv(TYPESAFE_API_KEY = "offline-local-fixture-only")
   on.exit(if (is.na(old_key)) Sys.unsetenv("TYPESAFE_API_KEY") else
     Sys.setenv(TYPESAFE_API_KEY = old_key), add = TRUE)
-  http_call <- function(path, ...) withr_options(Rjif.transport = NULL,
+  http_call <- function(path, max_wait = 2, ...) withr_options(Rjif.transport = NULL,
     Rjif.api_base = paste0(base, path), Rjif.retry_base = 0.01, Rjif.retry_cap = 0.02,
-    Rjif.retry_max_wait = 2, ..., jev_eval("s", list(q = jev_noul_q("q"))))
+    Rjif.retry_max_wait = max_wait, ..., jev_eval("s", list(q = jev_noul_q("q"))))
   hit_count <- function(path) {
     if (!file.exists(file.path(tmp, "hits"))) return(0L)
     sum(startsWith(readLines(file.path(tmp, "hits")), paste0(path, " ")))
@@ -256,6 +262,13 @@ if (.Platform$OS.type != "windows" && requireNamespace("httpuv", quietly = TRUE)
     cat("  elapsed", status, elapsed, "seconds\n")
     elapsed >= 0.9 && elapsed < 4 && hit_count(paste0("/", status)) == 2 &&
       jvalue(a$q) == 0.9 && jev_usage()$calls == 1 && jev_usage()$input_tokens == 7
+  })
+  for (path in c("/date", "/capped")) check(paste("F5 HTTP Retry-After max_wait timing", path), {
+    start <- proc.time()[["elapsed"]]
+    a <- http_call(path, max_wait = 0.4, Rjif.retries = 1, Rjif.timeout = 2)
+    elapsed <- proc.time()[["elapsed"]] - start
+    cat("  capped elapsed", path, elapsed, "seconds\n")
+    elapsed >= 0.35 && elapsed < 1.5 && hit_count(path) == 2 && jvalue(a$q) == 0.9
   })
   for (status in c(401, 403, 404, 422, 500)) check(paste("F5 HTTP nonretryable", status), {
     msg <- error_text(http_call(paste0("/", status), Rjif.retries = 3, Rjif.timeout = 2))

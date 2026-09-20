@@ -596,15 +596,18 @@ jev_answer_valid <- function(ans, q) {
   out
 }
 
-# Backoff for attempt k (1-based): min(cap, base * 2^(k-1)) plus up to 25%
-# jitter, unless the vendor sent a usable Retry-After (delta-seconds form;
-# the HTTP-date form is not parsed - we fall back to computed backoff, which
-# is documented behavior). A Retry-After above Rjif.retry_max_wait is NOT
-# silently waited out: the caller's clock budget is the user's, so we cap.
+# Backoff for attempt k (1-based), with up to 25% jitter. Retry-After may
+# be delta-seconds or an HTTP date; both are bounded by the caller's budget.
 .backoff_wait <- function(attempt, base, cap, retry_after, max_wait = cap) {
   ra <- suppressWarnings(as.numeric(retry_after))
+  if (length(ra) == 1L && is.na(ra) && is.character(retry_after)) {
+    date <- tryCatch(suppressWarnings(httr::parse_http_date(retry_after)),
+                     error = function(e) NA_real_)
+    if (length(date) == 1L && is.finite(as.numeric(date)))
+      ra <- max(0, as.numeric(difftime(date, Sys.time(), units = "secs")))
+  }
   computed <- min(cap, base * (2^(attempt - 1L)))
-  if (length(ra) == 1L && !is.na(ra) && ra >= 0) {
+  if (length(ra) == 1L && is.finite(ra) && ra >= 0) {
     return(min(ra, max_wait))   # honour server hints inside the caller's budget
   }
   jitter <- computed * stats::runif(1, 0, 0.25)
