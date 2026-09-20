@@ -86,8 +86,9 @@ types; the accessors read the three different numbers off an answer.
 }
 \details{
 Choice answers require a normalized distribution over the offered options
-and confidence in [0, 1]. The chosen option may trail the largest displayed
-probability by at most 0.02 (plus a 1e-9 floating-point guard).
+and confidence in [0, 1]. The chosen option must attain the largest displayed
+probability (exact ties are legal argmaxes; any strict trail rejects the
+answer as self-contradictory, per the API's own definition of \code{choice}).
 Score answers require confidence in [0, 1], probabilities and legend keys
 covering exactly \code{0} through \code{k-1}, and a score within 0.05 of the
 probability-weighted mean of the level indices. The distribution must sum to

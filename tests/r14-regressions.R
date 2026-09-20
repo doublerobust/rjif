@@ -69,10 +69,12 @@ check("F4 contradictory choice cannot route through jif", {
     probabilities = list(a = 0.01, b = 0.99))), jif("s", qc)))
   jif_abstained(a) && is.na(a) && is.na(jprob(attr(a, "answer")))
 })
-check("F4 winner tolerance exact boundary and just outside", {
-  decide <- function(p) suppressWarnings(withr_options(Rjif.transport = forge(list(
-    choice = "a", confidence = 1, probabilities = list(a = p, b = 1-p))), jif("s", qc)))
-  !jif_abstained(decide(0.49)) && jif_abstained(decide(0.48999))
+check("F4 winner rule tightened to max-displayed (r2 finding 5): 0.49/0.51 abstains, 0.5/0.5 tie decides", {
+  decide <- function(pa, pb) suppressWarnings(withr_options(Rjif.transport = forge(list(
+    choice = "a", confidence = 1, probabilities = list(a = pa, b = pb))), jif("s", qc)))
+  jif_abstained(decide(0.49, 0.51)) && jif_abstained(decide(0.48999, 0.51001)) &&
+    !jif_abstained(decide(0.5, 0.5)) && !jif_abstained(decide(0.51, 0.49)) &&
+    !jif_abstained(decide(0.7, 0.3))
 })
 check("F4 bare score cannot decide through jif", {
   a <- suppressWarnings(withr_options(Rjif.transport = forge(list(score = 1, confidence = 1)),

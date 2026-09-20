@@ -21,15 +21,25 @@
 
 JEV_PRICE_PER_MTOK <- 0.042   # $/million input tokens; output tokens are free
 
-# Contract tolerances (external audit finding 4; rationale in the
-# jev_answer_valid header). The API sends probabilities rounded to 2 decimals
-# (live-verified 2026-09-19), so exact comparisons would reject valid answers:
+# Contract tolerances (external audit finding 4; rationale at each constant).
+# The API sends probabilities rounded to 2 decimals (live-verified
+# 2026-09-19), so distribution comparisons need rounding-aware margins:
 #   JEV_PROB_SUM_TOL  - |sum(probabilities) - 1| upper bound
 #   JEV_WINNER_TOL    - how far the chosen choice-option may trail the top
 #                       option before the answer is called self-contradictory
+#                       (NOW 0: must attain the displayed maximum; exact ties
+#                       pass -- see the tightening note at its definition)
 #   JEV_WEIGHT_TOL    - |score - weighted mean of its distribution|
 JEV_PROB_SUM_TOL <- 0.01
-JEV_WINNER_TOL <- 0.02
+# Winner consistency tolerance. Was 0.02 on a "display rounding" rationale
+# that external audit r2 finding 5 correctly demolished: monotone rounding
+# cannot produce a displayed reversal. 40 live calls (12 tie-forced) showed
+# zero reversals, so the rule is now the documentation's: the chosen option
+# must attain the maximum DISPLAYED probability (exact ties pass; the 1e-9
+# parse guard in the comparison absorbs float noise only). If the vendor ever
+# starts disagreeing with its own docs, raise this with dated live evidence
+# cited in the jev_answer_valid header -- see finding-4 header there.
+JEV_WINNER_TOL <- 0
 JEV_WEIGHT_TOL <- 0.05
 
 # Maximum characters of an API error body echoed back to the user. The body is
@@ -393,14 +403,21 @@ jev_answer_valid <- function(ans, q) {
     }
     # winner consistency (audit finding 4, probe 3: the old validator accepted
     # choice='a' with probabilities a=.01 b=.99): the docs define `choice` as
-    # "the highest-probability option". The API rounds probabilities to 2
-    # decimals for display while argmax runs on unrounded values, so the chosen
-    # option may trail the displayed top by at most one rounding step
-    # (JEV_WINNER_TOL = 0.02); a larger gap is a self-contradictory answer.
-    # The 1e-9 guard is not paranoia: 0.51-0.49 evaluates to
-    # 0.020000000000000018 in binary floating point, so a bare `>` would
-    # reject the very boundary the tolerance documents as acceptable (found
-    # by the suite's own fixture, not by inspection).
+    # "the highest-probability option". TIGHTENED from a 0.02 tolerance
+    # (external audit r2 finding 5): the old rationale -- the API rounds
+    # probabilities for display while argmax runs on unrounded values -- does
+    # not justify accepting a DISPLAYED reversal: monotone rounding can turn
+    # two distinct values into a displayed TIE but can never make the
+    # displayed winner trail the displayed top. Evidence (2026-09-20, live,
+    # no forgeries): 40 calls over deliberately ambiguous states, including
+    # 12 with duplicated criteria built to force ties, produced ZERO
+    # winner-vs-argmax gaps. The rule is now: the chosen option must attain
+    # the maximum displayed probability (exact ties pass; the 1e-9 guard only
+    # absorbs JSON-parse noise, not a real gap). A future vendor reversal
+    # surfaces as a documented contract abstention -- the safe failure mode.
+    # If live traffic ever shows the vendor disagreeing with its own docs,
+    # relax JEV_WINNER_TOL here with dated evidence in the comment, and the
+    # reason string below will name the tolerance.
     # NOTE on the collision tests (R5-B1): pn was validated all-non-empty and
     # all-distinct above, so match(v, pn) is a unique POSITION; subscript by
     # index, never by name ([[ on a duplicated name picks the first).
