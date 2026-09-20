@@ -10,7 +10,9 @@ promises the 0.0.1 docs already made.
 
 - `JEV_WINNER_TOL` tightened from 0.02 to 0: a choice answer whose selected
   option does not attain the maximum displayed probability is now rejected as
-  self-contradictory (exact displayed ties still decide). The 0.02 margin
+  self-contradictory (exact displayed ties still decide, with a 1e-9
+  floating-point guard on the displayed values before normalization).
+  The 0.02 margin
   rested on a "display rounding" rationale that cannot produce a displayed
   reversal; 40 live calls (12 tie-forced with duplicated criteria) showed
   zero reversals. Effect: answers the old validator forwarded as decisions
@@ -28,10 +30,14 @@ promises the 0.0.1 docs already made.
 ### Changed
 
 - `selection_curve()` gains `policy = "positive" | "two_sided"` (default
-  unchanged). With `two_sided` the curve reports the coverage that
-  `jif()`'s two-sided noul floor actually delivers, computed by the same
-  internal helper so the two can never drift again; it refuses non-noul
-  batches. The result carries `attr(, "policy")`.
+  unchanged). With `two_sided` it uses the evaluator's shared window
+  predicate when `threshold < floor <= 1`, and the single-sided fallback
+  otherwise. Pass the evaluation threshold explicitly when it differs from
+  0.5. Non-noul batches are refused. The result carries `attr(, "policy")`
+  and, for `two_sided`, `attr(, "threshold")`.
+- Round 15 corrected the initial implementation: the window helper was not
+  actually shared, and low floors incorrectly selected both tails. The
+  evaluator and curve now call the same helper, with matching policy switches.
 - A corrupt or unreadable `cache` file now errors instead of warning and
   overwriting.
 
@@ -48,7 +54,9 @@ promises the 0.0.1 docs already made.
   `0.19999999999999996` in binary floating point; the `.7/.3` pair only
   worked because `1 - 0.7` lands above `0.3`).
 - Cache content identity: reordering or correcting the state vector no
-  longer replays stale judgments attached to the wrong records.
+  longer replays stale judgments attached to the wrong records. Round 15
+  also closed a refusal bypass for RDS files containing NULL and restored
+  empty state vectors, which the new digest initially rejected.
 
 ## 0.0.1 (2026-09-19)
 

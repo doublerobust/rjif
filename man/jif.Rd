@@ -89,8 +89,9 @@ jif_reason(x)
   pre-built variable was already evaluated by the caller and is routed by
   value. When one arm is a literal map and the other a pre-built map, each is
   consulted in its supported representation, YES before NO: a tag present in
-  the yes side wins over the same tag in the no side, and a match in either
-  representation decides (external audit r2 finding 1 fixed a regression that
+  the yes side wins over the same tag in the no side. Duplicate tags within
+  an arm select the first occurrence. A match in either representation
+  decides (external audit r2 finding 1 fixed a regression that
   consulted only literal tags first and misrouted mixed maps to
   \code{unknown}). Any other arm expression (for example \code{setNames(...)})
   is forced when its labels are inspected, with the same side-effect caveat

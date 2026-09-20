@@ -11,7 +11,7 @@ ece(df, p = "p", truth = "truth", n_bins = 10L, allow_type = NULL)
 
 selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
                 p = "p", truth = "truth", allow_type = NULL,
-                policy = c("positive", "two_sided"))
+                policy = c("positive", "two_sided"), threshold = 0.5)
 }
 \arguments{
   \item{df}{a data frame with one column of predicted probabilities and one
@@ -57,6 +57,10 @@ selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
     \code{"two_sided"} counts rows \code{\link{jif}} would decide under its
     two-sided noul \code{confidence_floor} window (either tail), and errors
     unless the batch is a noul frame. See \strong{Value}.}
+  \item{threshold}{\code{selection_curve()} only: the decision threshold to
+    match when \code{policy = "two_sided"}. Defaults to 0.5, like \code{jif()}.
+    Set it to the threshold used for evaluation; it is not inferred from the
+    batch. It does not affect the default \code{"positive"} selection rule.}
 }
 \value{
   \code{reliability_curve()} returns a data frame with one row per bin
@@ -88,16 +92,16 @@ selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
   a share of USABLE rows, not of all input rows; \code{attr(, "n_rows")}
   reports the full input size and \code{attr(, "n_usable")} the denominator.
   \code{attr(, "policy")} carries the selection rule used. With
-  \code{policy = "two_sided"} (noul batches only; other inputs error), a row
-  counts as kept when \code{jif()} would DECIDE it under the two-sided
-  \code{confidence_floor} window (either tail clears the floor) rather than
-  only when its probability clears the floor from above; this is the coverage
-  the decision policy actually delivers, computed by the same internal helper
-  so the curve and the evaluator cannot drift (external audit r2 finding 3:
-  at floor 0.7 the policy decides p = 0.01 AND p = 0.99, while a one-sided
-  curve reported 50\%). With the default \code{"positive"} the statistic is
-  the share of usable rows with \code{p >= floor} -- a positive-tail selection
-  view, not a decision coverage.
+  \code{policy = "two_sided"} (noul batches only; other inputs error), the
+  curve uses the evaluator's shared window predicate when
+  \code{threshold < floor <= 1}: keep \code{p >= floor} or
+  \code{p <= 1 - floor + 1e-9}. At other floors it keeps \code{p >= floor},
+  just as the evaluator's single-sided fallback does. For example, p = 0.01
+  and p = 0.99 both count at floor 0.7 and threshold 0.5, but only p = 0.99
+  counts at floor 0.4. \code{attr(, "threshold")} records the supplied
+  threshold for this policy. With the default \code{"positive"} the
+  statistic is the share of usable rows with \code{p >= floor}, a
+  positive-tail selection view, not a decision coverage.
   \code{pos_rate} is not correctness: classifying \code{p = (0.2, 0.8)}
   against \code{truth = (0, 1)} at floor 0 gives prevalence 0.5 even though
   both threshold-0.5 decisions are correct. A warning fires when no row is

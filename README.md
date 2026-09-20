@@ -110,7 +110,13 @@ Use one writer per cache path: rows are matched by position, and the digest
 detects a changed vector but cannot say which row moved. The file contains
 question text, criteria, run settings, and results in row order. It stores no
 plaintext states (only their digest) but can still disclose your data; protect
-it accordingly.
+it accordingly. A mismatched or unreadable cache is refused, including an
+RDS containing NULL rather than a result frame.
+
+Choice answers must select a maximum-probability option. Exact displayed
+ties pass; a trail greater than the 1e-9 floating-point guard rejects the
+answer and causes abstention. This check uses the displayed probabilities
+before sum normalization.
 
 ## Checking calibration
 
@@ -124,10 +130,11 @@ reliability_curve(df)   # per bin: mean predicted probability vs observed freque
 ece(df)                 # one summary number: expected calibration error
 selection_curve(df)     # as you raise the floor: what share of rows do you
                         # keep, and what's the event rate among them?
-                        # policy = "two_sided" (noul batches) instead counts
-                        # the rows jif()'s two-sided floor actually DECIDES
-                        # (either tail), so the curve and the decision policy
-                        # can never disagree
+                        # policy = "two_sided" (noul batches) counts rows
+                        # jif() would decide at each floor. Pass the same
+                        # threshold used for evaluation (default 0.5).
+                        # Either tail counts only when threshold < floor <= 1;
+                        # other floors use the single-sided rule.
 ```
 
 Know what they are. `ece()` is a point estimate using the classic equal-width
@@ -241,7 +248,9 @@ maps); `tests/r14-regressions.R` adds 51 audit-gate assertions, and on
 Unix-like systems runs them against real loopback HTTP fixtures (429/529
 retries, Retry-After waits, fractional timeouts). That block skips on Windows
 (needs fork), so on Windows either drive the loopback server recipe from the
-audit notes or let CI carry it. All three suites also run inside
+audit notes or let CI carry it. `tests/r15-regressions.R` adds 17 assertions
+for mixed-map precedence, cache identity and refusal, shared decision
+coverage, and winner validation. All four suites also run inside
 `R CMD check`.
 
 ## Why "Rjif"

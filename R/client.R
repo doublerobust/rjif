@@ -35,8 +35,8 @@ JEV_PROB_SUM_TOL <- 0.01
 # that external audit r2 finding 5 correctly demolished: monotone rounding
 # cannot produce a displayed reversal. 40 live calls (12 tie-forced) showed
 # zero reversals, so the rule is now the documentation's: the chosen option
-# must attain the maximum DISPLAYED probability (exact ties pass; the 1e-9
-# parse guard in the comparison absorbs float noise only). If the vendor ever
+# must attain the maximum DISPLAYED probability (exact ties pass; an absolute
+# 1e-9 floating-point guard is applied before sum normalization). If the vendor ever
 # starts disagreeing with its own docs, raise this with dated live evidence
 # cited in the jev_answer_valid header -- see finding-4 header there.
 JEV_WINNER_TOL <- 0
@@ -229,9 +229,9 @@ jev_key <- function() {
 # against the API the same evening):
 #   * choice answer: `choice` is "the highest-probability option", `confidence`
 #     required in [0,1], `probabilities` required over every option (docs
-#     https://docs.typesafe.ai/api). Winner consistency is enforced here with
-#     a tolerance that covers the API's 2-decimal probability rounding: the
-#     chosen option may not trail any offered option by more than 0.02.
+#     https://docs.typesafe.ai/api). The chosen option must attain the
+#     displayed maximum, with exact ties allowed and a 1e-9 absolute guard
+#     before sum normalization. See JEV_WINNER_TOL for the tightening history.
 #   * score answer: `probabilities` and `legend` are REQUIRED and keyed by the
 #     same level-index strings ("0".."k-1"); confidence required in [0,1]. The
 #     score must agree with the probability-weighted mean of its own
@@ -412,9 +412,10 @@ jev_answer_valid <- function(ans, q) {
     # no forgeries): 40 calls over deliberately ambiguous states, including
     # 12 with duplicated criteria built to force ties, produced ZERO
     # winner-vs-argmax gaps. The rule is now: the chosen option must attain
-    # the maximum displayed probability (exact ties pass; the 1e-9 guard only
-    # absorbs JSON-parse noise, not a real gap). A future vendor reversal
-    # surfaces as a documented contract abstention -- the safe failure mode.
+    # the maximum displayed probability within an absolute 1e-9 guard.
+    # Exact ties pass. Check the raw displayed values before normalization;
+    # gaps at or below 1e-9 pass regardless of their cause. Larger reversals
+    # surface as a documented contract abstention.
     # If live traffic ever shows the vendor disagreeing with its own docs,
     # relax JEV_WINNER_TOL here with dated evidence in the comment, and the
     # reason string below will name the tolerance.
