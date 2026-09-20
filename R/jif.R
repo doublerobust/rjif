@@ -138,6 +138,13 @@ jif <- function(state, question, ..., threshold = 0.5,
 # Noul with floor > threshold uses the two-sided window: TRUE above the floor,
 # FALSE below 1-floor, abstain in between. All other combinations keep the
 # single-sided policy: gate jprob() against the floor, then threshold.
+# Shared inclusive two-tail predicate. Callers select this window only when
+# threshold < floor <= 1; other floors keep the single-sided p >= floor rule.
+# The epsilon corrects subtraction at the negative cutoff (1 - 0.8 < 0.2).
+.noul_window_decided <- function(p, f) {
+  (p >= f) | (p <= 1 - f + 1e-9)
+}
+
 .decide_answer <- function(ans, q, threshold, confidence_floor) {
   if (is.na(confidence_floor)) return(list(
     dec = NA, reason = "confidence_floor is NA; refusing to decide"))
@@ -148,15 +155,10 @@ jif <- function(state, question, ..., threshold = 0.5,
     p <- suppressWarnings(as.double(v))
     if (is.na(p)) return(list(dec = NA, reason = "confidence unavailable with a floor set"))
     neg_cut <- 1 - confidence_floor
-    if (p >= confidence_floor) return(list(dec = TRUE, reason = NA_character_))
-    # Inclusive negative cutoff needs the same 1e-9 guard as the contract
-    # tolerances (external audit r2 finding 4): 1-0.8 evaluates to
-    # 0.19999999999999996, so a probability of exactly 0.2 failed `p <= 1-f`
-    # and abstained despite the docs (and our own reason string) calling the
-    # cutoff inclusive. floor .7/.3 passed only because 1-0.7 lands ABOVE 0.3
-    # -- luck, not correctness. The guard is far below the API's 2-decimal
-    # granularity (0.21 still abstains; tested both sides).
-    if (p <= neg_cut + 1e-9) return(list(dec = FALSE, reason = NA_character_))
+    if (.noul_window_decided(p, confidence_floor)) {
+      # TRUE takes precedence where the two tails overlap.
+      return(list(dec = p >= confidence_floor, reason = NA_character_))
+    }
     return(list(dec = NA, reason = paste0(
       "probability ", formatC(p, format = "f", digits = 3),
       " is in the uncertain middle of the two-sided confidence_floor ",
@@ -241,9 +243,8 @@ jev_score_many <- function(state_vec, question, ...,
   batch <- suppressWarnings(as.integer(batch))
   if (length(batch) != 1L || is.na(batch) || batch < 1L) batch <- 16L
 
-# Cache identity (external audit r2 finding 2): full question, requested
-# model, row count, decision policy, AND an order-sensitive digest of the
-  # model, row count, decision policy, AND an order-sensitive digest of the
+  # Cache identity: full question, requested model, row count, decision
+  # policy, AND an order-sensitive digest of the
   # state CONTENT. Without the digest, re-sorting or editing the extract
   # between passes silently re-attached old judgments to the wrong records
   # (Codex fixture: c("present","absent") cached 0.99/0.01, then
@@ -281,7 +282,7 @@ jev_score_many <- function(state_vec, question, ...,
         rerun_err <- isTRUE(getOption("Rjif.cache_rerun_errors", TRUE))
         filled <- !is.na(abst) & (if (rerun_err) !failed else TRUE)
         cache_resumed <- sum(filled)
-      } else if (!is.null(prev)) {
+      } else {
         # REFUSE rather than overwrite (external audit r2 finding 2): a
         # mismatched cache is the only prior artifact of a run that may have
         # cost money; silently replacing it (the old behavior) threw it away
@@ -408,7 +409,8 @@ jev_score_many <- function(state_vec, question, ...,
       charToRaw(if (is.na(state_vec[[i]])) "N" else format(length(raws[[i]]), scientific = FALSE)),
       sep)
   }), use.names = FALSE)
-  d <- openssl::md5(payload)
+  # unlist(list()) is NULL, but md5 requires raw(0) for an empty vector.
+  d <- openssl::md5(as.raw(payload))
   list(digest = paste(format(d), collapse = ""), n = length(state_vec))
 }
 

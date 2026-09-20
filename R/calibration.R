@@ -127,21 +127,11 @@ ece <- function(df, p = "p", truth = "truth", n_bins = 10L,
 # and p in [0,1]) -- i.e. it answers "of the rows we can score, how many clear
 # this floor?". Rows you could not score at all are excluded from the
 # denominator; attr(, "n_usable") tells you how big that denominator is.
-# Shared two-sided window test (single source of truth -- external audit r2
-# finding 3 asked that selection_curve() stop disagreeing with the decision
-# policy). Under the jif() noul policy with floor f and threshold 0.5: the row
-# is DECIDED (either sign) when p >= f or p <= 1 - f; the 1e-9 guard keeps the
-# cutoffs inclusive exactly like .decide_answer (finding 4). f <= 0.5 selects
-# nothing extra: the policy is then single-sided, and .decided_two_sided must
-# not be used (the caller keeps the plain p >= f rule).
-.noul_window_decided <- function(p, f) {
-  (p >= f) | (p <= 1 - f + 1e-9)
-}
-
 selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
                             p = "p", truth = "truth", allow_type = NULL,
-                            policy = c("positive", "two_sided")) {
+                            policy = c("positive", "two_sided"), threshold = 0.5) {
   policy <- match.arg(policy)
+  threshold <- .single_number(threshold, "threshold")
   if (policy == "two_sided" && !identical(attr(df, "question_type"), "noul")) {
     # two-sided mirrors jif()'s noul decision window; for a choice/score
     # batch (or an untagged hand-built frame) it is meaningless.
@@ -171,13 +161,9 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
     warning("Rjif: selection_curve() had no usable rows.", call. = FALSE)
   }
   rows <- lapply(as.numeric(floor_seq), function(f) {
-    # policy = "two_sided" mirrors jif()'s noul decision window through the
-    # SAME helper (.noul_window_decided), so the curve can never drift from
-    # the evaluator again (external audit r2 finding 3: at floor 0.7 the
-    # policy decides both rows of p = (0.01, 0.99) while a one-sided curve
-    # reported coverage 0.5). Default "positive" keeps the old meaning:
-    # share of rows with p >= f (a positive-tail selection statistic).
-    sel <- if (policy == "two_sided") .noul_window_decided(pv, f) else pv >= f
+    # Match the evaluator's policy switch as well as its window predicate.
+    sel <- if (policy == "two_sided" && f > threshold && f <= 1)
+      .noul_window_decided(pv, f) else pv >= f
     k <- sum(sel)
     data.frame(floor = f,
                n = n,
@@ -191,6 +177,7 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
   attr(out, "n_usable") <- n
   attr(out, "n_rows") <- nrow(df)
   attr(out, "policy") <- policy
+  if (policy == "two_sided") attr(out, "threshold") <- threshold
   rownames(out) <- NULL
   out
 }
