@@ -238,7 +238,7 @@ jif("the patient was hospitalized for six days after the infusion",
 
 ## Tests
 
-`Rscript tests/smoke.R` runs 232 offline assertions against the mock
+`Rscript tests/smoke.R` runs 239 offline assertions against the mock
 transport and scripted fake responses: the abstention behavior, the API
 response contract (including the live-verified continuous-score round trip),
 malformed-usage handling, credential-retention boundaries, and the calibration

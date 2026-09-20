@@ -242,8 +242,8 @@ jev_score_many <- function(state_vec, question, ...,
   # Canonicalise to UTF-8 before BOTH the cache digest and request
   # serialisation (external audit round 3, finding R3-1): R strings carry
   # per-element encoding flags, so "é" marked UTF-8 and the same BYTES marked
-  # latin1 are different text that charToRaw() — and therefore an
-  # encoding-blind digest — cannot tell apart, while toJSON() sends them as
+  # latin1 are different text that charToRaw() -- and therefore an
+  # encoding-blind digest -- cannot tell apart, while toJSON() sends them as
   # different payloads. One representation for hash and wire removes the
   # mismatch; it also unifies the same text arriving under different declared
   # encodings, which is the desirable direction for resume identity.
@@ -276,7 +276,11 @@ jev_score_many <- function(state_vec, question, ...,
   # stores no plaintext states. Not a security hash: it detects accidental
   # reorders and changed extracts, it is not tamper-proof.
   cache_resumed <- 0L
-  cache_fingerprint <- serialize(list(version = 4L, question = unclass(q),
+  # version 5L: the frame gains per-row provenance columns (model,
+  # evaluated_at, row_source, score_value, probs) -- round 3 carryover 1.
+  # An old v4 cache would ALSO fail the frame-shape check, but the version
+  # tag makes the reason explicit in the refusal.
+  cache_fingerprint <- serialize(list(version = 5L, question = unclass(q),
     model = model, n = n, threshold = threshold, floor = confidence_floor,
     states = .state_digest(state_vec)),
     NULL, version = 2)
@@ -284,6 +288,24 @@ jev_score_many <- function(state_vec, question, ...,
   chosen <- rep(NA_character_, n); abst <- rep(NA, n); errs <- rep("", n)
   failed <- rep(FALSE, n)
   filled <- rep(FALSE, n)
+  # Per-row provenance (round 3 carryover 1). model/evaluated_at describe the
+  # row's ACTUAL evaluation (persisted across resumes, so an interrupted run
+  # whose 'jev-latest' alias changed underneath it can distinguish day-1 rows
+  # from day-2 rows); row_source describes THIS run: "cache" (resumed),
+  # "api" (attempted a call), or "none" (abstained without any call, e.g.
+  # NA state). score_value keeps the exact numeric score for score batches --
+  # `option` remains a 3-decimal display string and was the only carrier.
+  # probs_json holds the full named distribution as a JSON string (NA for
+  # noul answers, which have no distribution, and for rows without one).
+  # A character column, not a list column: data.frame list columns drop NULL
+  # elements silently (`d$x <- list_of_NULLs` mis-sizes), and an atomic column
+  # keeps the cache frame fully round-trippable and type-checkable.
+  # jprobs() parses it back to a named numeric vector.
+  mdl <- rep(NA_character_, n)
+  whenat <- rep(NA_character_, n)
+  src <- rep("none", n)
+  score_val <- rep(NA_real_, n)
+  probs_json <- rep(NA_character_, n)
   if (!is.null(cache)) {
     if (!is.character(cache) || length(cache) != 1L || is.na(cache) ||
         !nzchar(cache)) {
@@ -303,9 +325,26 @@ jev_score_many <- function(state_vec, question, ...,
         dec <- prev$decision; chosen <- prev$option; ps <- prev$p
         cf <- prev$confidence; abst <- prev$abstained; errs <- prev$error
         failed <- attr(prev, "row_failed", exact = TRUE)
+        # Restore per-row provenance. v5 frames carry the columns; a frame
+        # without them (impossible past the v5 fingerprint today, kept as a
+        # forward-compatible read) falls back to NA model/time.
+        mdl <- prev$model %||% mdl
+        whenat <- prev$evaluated_at %||% whenat
+        score_val <- prev$score_value %||% score_val
+        probs_json <- prev$probs_json %||% probs_json
         rerun_err <- isTRUE(getOption("Rjif.cache_rerun_errors", TRUE))
         filled <- !is.na(abst) & (if (rerun_err) !failed else TRUE)
         cache_resumed <- sum(filled)
+        # row_source describes THIS run: a reused row is "cache" UNLESS the
+        # persisted row was never attempted at all (row_source "none", e.g.
+        # an NA state) -- that fact survives resumes and must not be
+        # laundered into "cache". Rows being (re)attempted now stay "api".
+        if (any(filled)) {
+          prev_src <- prev$row_source
+          was_none <- if (!is.null(prev_src) && length(prev_src) == n)
+            prev_src == "none" else rep(FALSE, n)
+          src[filled] <- ifelse(was_none[filled], "none", "cache")
+        }
       } else {
         # REFUSE rather than overwrite (external audit r2 finding 2): a
         # mismatched cache is the only prior artifact of a run that may have
@@ -329,22 +368,26 @@ jev_score_many <- function(state_vec, question, ...,
       # A new attempt must replace every field, including stale diagnostics.
       dec[j] <- NA; chosen[j] <- NA_character_; ps[j] <- cf[j] <- NA_real_
       abst[j] <- NA; errs[j] <- ""; failed[j] <- FALSE
+      mdl[j] <- NA_character_; whenat[j] <- NA_character_
+      score_val[j] <- NA_real_; probs_json[j] <- NA_character_
       st <- state_vec[[j]]
       if (is.na(st)) {
         dec[j] <- NA; abst[j] <- TRUE; errs[j] <- "state is NA"
         failed[j] <- TRUE
-        next
+        next   # row_source stays "none": no call was possible
       }
+      src[j] <- "api"
       # jev_eval can warn (contract violation) as well as throw; capture both.
       warns <- character(0)
-      ans <- withCallingHandlers(
-        tryCatch(jev_eval(st, list(q = q), model = model)$q,
+      envelope <- withCallingHandlers(
+        tryCatch(jev_eval(st, list(q = q), model = model),
                  error = function(err) structure(list(msg = conditionMessage(err)),
                                                  class = "jev_row_error")),
         warning = function(w) {
           warns <<- c(warns, conditionMessage(w))
           invokeRestart("muffleWarning")
         })
+      ans <- if (inherits(envelope, "jev_row_error")) envelope else envelope$q
       if (inherits(ans, "jev_row_error")) {
         dec[j] <- NA; abst[j] <- TRUE; failed[j] <- TRUE
         errs[j] <- .clean_error_text(ans$msg, 300L)
@@ -354,6 +397,22 @@ jev_score_many <- function(state_vec, question, ...,
       p <- jprob(ans)
       ps[j] <- p
       cf[j] <- jconf(ans)
+      # A response arrived: stamp its provenance (round 3 carryover 1).
+      # model_returned is the vendor's resolved model for THIS row; captured
+      # before display redaction merge issues can matter, and scrubbed at the
+      # jev_eval boundary already.
+      mdl[j] <- attr(ans, "model_returned") %||% NA_character_
+      whenat[j] <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+      if (q$type == "score") score_val[j] <- v
+      ap <- ans[["probs"]]
+      if (q$type != "noul" && !is.null(ap) && length(ap)) {
+        # ap is the validator's NORMALIZED distribution (probs, post /sum).
+        # digits = NA: shortest round-trip decimal for each double, so
+        # jprobs() reproduces these values bit-for-bit rather than adding a
+        # second, independently rounded copy.
+        probs_json[j] <- jsonlite::toJSON(as.list(ap), digits = NA,
+                                          auto_unbox = TRUE, na = "null")
+      }
       # identical policy to jif() via .decide_answer() (audit finding 3):
       # two-sided noul window when floor > threshold, single-sided otherwise.
       d <- .decide_answer(ans, q, threshold, confidence_floor)
@@ -392,10 +451,16 @@ jev_score_many <- function(state_vec, question, ...,
     # persist the chunk's results BEFORE advancing, so an interrupt (or a
     # thrown outside error) between chunks loses at most one chunk of work
     if (!is.null(cache)) .cache_save(cache, dec, chosen, ps, cf, abst, errs,
-                                     q, failed, cache_fingerprint)
+                                     q, failed, cache_fingerprint,
+                                     mdl, whenat, src, score_val, probs_json)
   }
   out <- data.frame(decision = dec, option = chosen, p = ps, confidence = cf,
                     abstained = abst, error = errs, stringsAsFactors = FALSE)
+  out$model <- mdl
+  out$evaluated_at <- whenat
+  out$row_source <- src
+  out$score_value <- score_val
+  out$probs_json <- probs_json
   attr(out, "question_type") <- q$type
   attr(out, "n_abstained") <- sum(abst)
   if (!is.null(cache)) attr(out, "n_resumed") <- cache_resumed
@@ -439,20 +504,29 @@ jev_score_many <- function(state_vec, question, ...,
 }
 
 .cache_valid <- function(df, n, fingerprint) {
-  cols <- c("decision", "option", "p", "confidence", "abstained", "error")
+  cols <- c("decision", "option", "p", "confidence", "abstained", "error",
+            "model", "evaluated_at", "row_source", "score_value", "probs_json")
   if (!is.data.frame(df) || nrow(df) != n || !identical(names(df), cols) ||
       !identical(attr(df, "cache_fingerprint", exact = TRUE), fingerprint)) return(FALSE)
   failed <- attr(df, "row_failed", exact = TRUE)
   is.logical(df$decision) && is.character(df$option) && is.numeric(df$p) &&
     is.numeric(df$confidence) && is.logical(df$abstained) &&
     is.character(df$error) && !anyNA(df$error) &&
+    is.character(df$model) && is.character(df$evaluated_at) &&
+    is.character(df$row_source) && is.numeric(df$score_value) &&
+    is.character(df$probs_json) &&
     is.logical(failed) && length(failed) == n && !anyNA(failed)
 }
 
 .cache_save <- function(cache, dec, chosen, ps, cf, abst, errs, q, failed,
-                        fingerprint) {
+                        fingerprint, mdl, whenat, src, score_val, probs_json) {
   df <- data.frame(decision = dec, option = chosen, p = ps, confidence = cf,
                    abstained = abst, error = errs, stringsAsFactors = FALSE)
+  df$model <- mdl
+  df$evaluated_at <- whenat
+  df$row_source <- src
+  df$score_value <- score_val
+  df$probs_json <- probs_json
   attr(df, "question_type") <- q$type
   attr(df, "cache_fingerprint") <- fingerprint
   attr(df, "row_failed") <- failed

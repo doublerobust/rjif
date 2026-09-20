@@ -6,6 +6,7 @@
 \alias{jvalue}
 \alias{jprob}
 \alias{jconf}
+\alias{jprobs}
 \title{Mixed Questions in One Call, and the Answer Accessors}
 \usage{
 jev_eval(state, questions, model = getOption("Rjif.model", "jev-latest"))
@@ -21,6 +22,8 @@ jvalue(ans)
 jprob(ans)
 
 jconf(ans)
+
+jprobs(x)
 }
 \arguments{
   \item{state}{single non-NA string or a non-empty list (structured records,
@@ -57,6 +60,9 @@ jconf(ans)
 
   \item{ans}{one answer object from \code{jev_eval()} or
     \code{\link{jif}} (class \code{jev_answer}).}
+
+  \item{x}{a \code{jev_answer} object, or one string from the
+    \code{probs_json} column of a \code{\link{jev_score_many}} result.}
 }
 \value{
   \code{jev_eval()} returns a \code{jev_answers} list with one answer per
@@ -77,6 +83,18 @@ jconf(ans)
   for Noul, P(chosen option) for Choice, the API confidence for Score.
   \code{jconf()} returns the API's confidence field, which is \code{NA} for
   Noul answers because the API sends none.
+
+  \code{jprobs()} returns the probability distribution behind an answer
+  as a named numeric vector (level indices \code{"0"}..\code{"k-1"} for
+  Score, option keys for Choice), or \code{NULL} when there is none (Noul
+  answers carry a single scalar; failed or abstained rows carry \code{NA}).
+  It accepts either a \code{jev_answer} object or a string from a
+  \code{\link{jev_score_many}} result's \code{probs_json} column. The stored
+  values are the contract validator's NORMALIZED distribution (the API's
+  probabilities divided by their displayed sum, which the validator requires
+  to be ~1); the JSON round trip itself is shortest-exact, so parsing
+  reproduces those normalized values bit-for-bit, not independently rounded
+  display copies.
 }
 \description{
 \code{jev_eval()} sends one state and any number of mixed questions in a

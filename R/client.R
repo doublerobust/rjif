@@ -914,9 +914,20 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
   # depth-capped. Nothing key-bearing escapes into dput/serialize/print/RDS.
   ans <- lapply(ans, .redact_value)
   names(ans) <- .scrub_secrets(.redact_key(as.character(names(questions))))
+  returned_model <- .scrub_secrets(.redact_key(
+    as.character(.as_scalar(raw[["model"]], "character") %||% model)))
+  # Per-answer provenance (round 3 carryover 1): the envelope attribute below
+  # is dropped by the $q extraction that jif() and jev_score_many() use, so
+  # the alias-drift risk was invisible per row. Attach requested AND returned
+  # model to each answer object itself; both go through the same scrub path as
+  # the envelope attribute, so nothing key-bearing escapes.
+  ans <- lapply(ans, function(a) {
+    attr(a, "model_requested") <- .scrub_secrets(.redact_key(model))
+    attr(a, "model_returned") <- returned_model
+    a
+  })
   structure(ans,
-            model = .scrub_secrets(.redact_key(
-              as.character(.as_scalar(raw[["model"]], "character") %||% model))),
+            model = returned_model,
             class = "jev_answers")
 }
 
@@ -986,6 +997,35 @@ jprob <- function(ans) {
     score  = jconf(ans),
     NA_real_)
   if (length(out) != 1L) NA_real_ else out
+}
+
+# Full probability distribution behind an answer (round 3 carryover 1).
+# Accepts a jev_answer object (from jif()'s attr(, "answer")) or a single
+# string from a jev_score_many() result's `probs_json` column. Returns a
+# named numeric vector, or NULL when there is no distribution (noul answers
+# carry a single scalar; failed/abstained rows carry NA). The JSON is written
+# with digits = NA (shortest exact round-trip), so the parsed values are
+# bit-for-bit the vendor's numbers, not 3-decimal display copies.
+jprobs <- function(x) {
+  keep <- function(v) {
+    if (is.null(v) || !length(v)) return(NULL)
+    # unlist() keeps the level-index names; as.numeric() would silently strip
+    # them, and an unnamed distribution is a provenance column with its
+    # labels lost. Carry the names across the coercion by hand. NA values
+    # are kept as-is: provenance reports what the vendor sent, it does not
+    # filter it.
+    flat <- unlist(v, recursive = TRUE)
+    out <- suppressWarnings(as.numeric(flat))
+    names(out) <- names(flat)
+    out
+  }
+  if (inherits(x, "jev_answer")) return(keep(x$probs))
+  if (is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)) {
+    parsed <- tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE),
+                       error = function(e) NULL)
+    return(keep(parsed))
+  }
+  NULL
 }
 
 jev_usage <- function() {

@@ -1579,7 +1579,7 @@ expect("r4-1: 'bytes'-marked states are rejected before digest, cache, or transp
            identical(md5a, tools::md5sum(cf)) &&
            identical(as.integer(attr(seeded, "n_resumed")), 0L)  # seed run; the resume attempt must never produce a decision at all
        }))
-expect("r3-1: a version-3 cache identity is never trusted by version-4 code (forged on-disk; positive control resumes at 4L)",
+expect("r3-1: an old-version cache identity is never trusted (forged on-disk; positive control resumes at the current version)",
        local({
          cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
          calls <- 0L
@@ -1590,13 +1590,16 @@ expect("r3-1: a version-3 cache identity is never trusted by version-4 code (for
                         jev_score_many("s", "x", cache = cf)))
          stopifnot(calls == 1L)
          # Forge from the ON-DISK frame (complete, with row_failed), changing
-         # ONLY the fingerprint version 4L -> 3L (round 4, R4-2: forging from
-         # the returned frame produced an always-invalid cache that passed
-         # vacuously even on old code). For ASCII input this is byte-
-         # compatible with a real v3 identity except the version tag.
+         # ONLY the fingerprint version to a stale value (round 4, R4-2:
+         # forging from the returned frame produced an always-invalid cache
+         # that passed vacuously even on old code). The frame KEEPS the
+         # current column shape, so the refusal can only come from the
+         # version tag inside the identity -- the exact isolation test.
+         # (Version numbers advance with each audit round; forge 5L -> 3L.)
          disk <- readRDS(cf)
          fp <- unserialize(attr(disk, "cache_fingerprint"))
-         stopifnot(identical(fp$version, 4L))
+         stopifnot(identical(fp$version, 5L))
+         cur_version <- fp$version
          fp$version <- 3L
          old <- disk; attr(old, "cache_fingerprint") <- serialize(fp, NULL, version = 2)
          saveRDS(old, cf); md5a <- tools::md5sum(cf)
@@ -1605,13 +1608,121 @@ expect("r3-1: a version-3 cache identity is never trusted by version-4 code (for
                        error = conditionMessage)
          refused <- grepl("does not match", e, fixed = TRUE) &&
            calls == 1L && identical(md5a, tools::md5sum(cf))
-         # positive control: the same frame restored to 4L must RESUME
-         # (isolates version rejection from any shape/identity error)
+         # positive control: the same frame restored to the current version
+         # must RESUME (isolates version rejection from any shape error)
          back <- disk; attr(back, "cache_fingerprint") <-
            serialize(unserialize(attr(back, "cache_fingerprint")), NULL, version = 2)
+         attr(back, "cache_fingerprint") <-
+           serialize({ fp2 <- unserialize(attr(disk, "cache_fingerprint"))
+                       fp2$version <- cur_version; fp2 }, NULL, version = 2)
          saveRDS(back, cf)
          r <- withr_options(Rjif.transport = tr, jev_score_many("s", "x", cache = cf))
          refused && calls == 1L && identical(attr(r, "n_resumed"), 1L)
+       }))
+
+expect("r3p: score batch keeps the EXACT score_value and full named distribution",
+       local({
+         # fixture obeys the score contract exactly: probabilities sum to 1
+         # and the score IS the weighted mean (0*0 + 1*.90625 + 2*.09375 =
+         # 1.09375). 1.09375 is exactly representable in binary floats, so
+         # score_value can be asserted BIT-exact while `option` keeps the
+         # 3-decimal display (a sqrt(2) fixture was the first attempt and
+         # the contract validator correctly rejected it: no representable
+         # probability triple has a non-dyadic weighted mean).
+         tr <- function(body) list(model = "resolved-x", usage = list(input_tokens = 10L),
+           answers = list(q = list(type = "score", score = 1.09375,
+                                   confidence = 0.85,
+             legend = stats::setNames(c("none", "mild", "severe"), c("0", "1", "2")),
+             probabilities = list("0" = 0, "1" = 0.90625, "2" = 0.09375))))
+         d <- withr_options(Rjif.transport = tr,
+              jev_score_many("narr", jev_score_q("s", c("none", "mild", "severe"))))
+         pb <- jprobs(d$probs_json[[1]])
+         identical(d$score_value[[1]], 1.09375) &&
+           identical(d$option[[1]], "1.094") &&
+           identical(pb, c("0" = 0, "1" = 0.90625, "2" = 0.09375)) &&
+           identical(jprobs(withr_options(Rjif.transport = tr,
+              jev_eval("n", list(q = jev_score_q("s", c("none", "mild", "severe"))))$q)), pb)
+       }))
+expect("r3p: noul rows carry no distribution (probs_json NA, jprobs NULL)",
+       local({
+         tr <- function(body) list(model = "m", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul", noul = 0.9)))
+         d <- withr_options(Rjif.transport = tr, jev_score_many("s", "x"))
+         is.na(d$probs_json[[1]]) && is.null(jprobs(d$probs_json[[1]])) &&
+           is.na(d$score_value[[1]])
+       }))
+expect("r3p: provenance columns survive a cache resume (model+time persist, source flips)",
+       local({
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         calls <- 0L
+         tr <- function(body) { calls <<- calls + 1L
+           list(model = "day-one-resolved", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         a <- withr_options(Rjif.transport = tr, jev_score_many(c("s1", "s2"), "x", cache = cf))
+         stopifnot(calls == 2L)
+         # the alias resolves DIFFERENTLY on the resume run: day-one rows must
+         # keep day-one's returned model, not silently inherit day-two's
+         tr2 <- function(body) { calls <<- calls + 1L
+           list(model = "day-two-resolved", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         b <- withr_options(Rjif.transport = tr2, jev_score_many(c("s1", "s2"), "x", cache = cf))
+         t <- a$evaluated_at[[1]]
+         all(a$row_source == "api") && all(b$row_source == "cache") &&
+           identical(b$model, a$model) && identical(b$evaluated_at, a$evaluated_at) &&
+           identical(attr(b, "n_resumed"), 2L) && calls == 2L &&
+           grepl("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$", t)
+       }))
+expect("r3p: row_source is 'none' (not 'api') for NA states; model/evaluated_at NA there",
+       local({
+         tr <- function(body) list(model = "m", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul", noul = 0.9)))
+         d <- withr_options(Rjif.transport = tr, jev_score_many(c("ok", NA), "x"))
+         identical(d$row_source[[2]], "none") && is.na(d$model[[2]]) &&
+           is.na(d$evaluated_at[[2]]) && identical(d$row_source[[1]], "api") &&
+           identical(d$model[[1]], "m")
+       }))
+expect("r3p: row_source 'none' survives a resume (never laundered into 'cache')",
+       local({
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         calls <- 0L
+         tr <- function(body) { calls <<- calls + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         a <- withr_options(Rjif.transport = tr,
+              jev_score_many(c("s1", NA), "x", cache = cf))
+         stopifnot(identical(a$row_source, c("api", "none")), calls == 1L)
+         b <- withr_options(Rjif.transport = tr,
+              jev_score_many(c("s1", NA), "x", cache = cf))
+         # s1 is genuinely reused; the NA row was never attempted in EITHER
+         # run. n_resumed counts s1 only -- a failed/NA row is never "filled"
+         # (rerun-errors policy re-walks it, and it short-circuits without a
+         # call, staying row_source "none").
+         identical(b$row_source, c("cache", "none")) && calls == 1L &&
+           identical(attr(b, "n_resumed"), 1L) &&
+           is.na(b$model[[2]]) && identical(b$model[[1]], "m")
+       }))
+expect("r3p: jif()'s answer attribute carries requested AND returned model (alias drift visible)",
+       local({
+         tr <- function(body) list(model = "jev-2026-09-20-prod", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul", noul = 0.9)))
+         a <- withr_options(Rjif.transport = tr, jif("s", "q"))
+         ans <- attr(a, "answer")
+         identical(attr(ans, "model_requested"), "jev-latest") &&
+           identical(attr(ans, "model_returned"), "jev-2026-09-20-prod") &&
+           identical(withr_options(Rjif.transport = tr,
+              attr(jev_eval("s", list(q = jev_noul_q("q")), model = "alias-a"), "model")),
+                     "jev-2026-09-20-prod")
+       }))
+expect("r3p: a 'bytes'-marked state never reaches provenance stamping (rejected first)",
+       local({
+         b <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(b) <- "bytes"
+         reached <- 0L
+         tr <- function(body) { reached <<- reached + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         e <- tryCatch({ withr_options(Rjif.transport = tr,
+                        jev_score_many(b, "x")); "" }, error = conditionMessage)
+         grepl("'bytes'-marked", e, fixed = TRUE) && reached == 0L
        }))
 
 cat("\n")

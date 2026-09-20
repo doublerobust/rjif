@@ -101,7 +101,21 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
   \code{abstained}, and \code{error} (per-row failure or abstention text,
   redacted of any API key; empty string when clean. Since the two-sided noul
   floor, rows policy-abstained by \code{confidence_floor} also record their
-  reason here, same wording as \code{\link{jif_reason}}). Attributes
+  reason here, same wording as \code{\link{jif_reason}}), plus per-row
+  provenance columns: \code{model} (the resolved model that produced THIS
+  row's answer, as the API reported it; \code{NA} for rows never evaluated),
+  \code{evaluated_at} (row's evaluation time, UTC ISO 8601; persisted across
+  resumes, so it never silently moves to the re-run's clock),
+  \code{row_source} (\code{"api"}: evaluated by a call in this run;
+  \code{"cache"}: result reused from \code{cache}; \code{"none"}: no call
+  was ever possible, e.g. an NA state), \code{score_value} (the exact
+  continuous score as a double for Score batches -- \code{option} is only a
+  3-decimal display; \code{NA} elsewhere), and \code{probs_json} (the
+  validator's normalized probability distribution as a
+  shortest-round-trip JSON string, parseable with \code{\link{jprobs}};
+  \code{NA} for Noul and for rows without one).
+  Together they distinguish rows judged before and after a model alias
+  changed underneath an interrupted cached run. Attributes
   \code{n_abstained} and \code{question_type} summarise the run,
   \code{n_resumed} states how many rows came from \code{cache}; the row count
   is \code{nrow(df)}.

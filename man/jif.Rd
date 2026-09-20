@@ -73,7 +73,11 @@ jif_reason(x)
   option name (Choice questions), or \code{abstain} (default \code{NA}) when
   uncertain. The result carries attributes \code{abstained}, \code{answer}
   (the full \code{jev_answer} object, readable with \code{\link{jvalue}},
-  \code{\link{jprob}}, \code{\link{jconf}}), and \code{abstain_reason}.
+  \code{\link{jprob}}, \code{\link{jconf}}, and \code{\link{jprobs}}; it
+  also carries \code{model_requested} and \code{model_returned} attributes
+  naming the alias you asked for and the resolved model that answered, so
+  provenance survives the extraction that previously dropped the envelope),
+  and \code{abstain_reason}.
 
   \code{j_ifelse()} returns \code{unknown} if \code{test} abstained or is a
   bare \code{NA}; otherwise, when \code{test} is a string (a decided Choice
