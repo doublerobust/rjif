@@ -10,7 +10,8 @@ reliability_curve(df, p = "p", truth = "truth", n_bins = 10L,
 ece(df, p = "p", truth = "truth", n_bins = 10L, allow_type = NULL)
 
 selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
-                p = "p", truth = "truth", allow_type = NULL)
+                p = "p", truth = "truth", allow_type = NULL,
+                policy = c("positive", "two_sided"))
 }
 \arguments{
   \item{df}{a data frame with one column of predicted probabilities and one
@@ -50,6 +51,12 @@ selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
     measures concentration versus outcome, not event-probability calibration.
     Hand-built data frames without a \code{question_type} attribute are the
     caller's responsibility and pass without a type check.}
+
+  \item{policy}{\code{selection_curve()} only: \code{"positive"} (default)
+    counts rows whose probability clears the floor from above;
+    \code{"two_sided"} counts rows \code{\link{jif}} would decide under its
+    two-sided noul \code{confidence_floor} window (either tail), and errors
+    unless the batch is a noul frame. See \strong{Value}.}
 }
 \value{
   \code{reliability_curve()} returns a data frame with one row per bin
@@ -80,6 +87,17 @@ selection_curve(df, floor_seq = seq(0, 0.95, by = 0.05),
   prevalence among kept rows), \code{escalated} (1 - coverage). Coverage is
   a share of USABLE rows, not of all input rows; \code{attr(, "n_rows")}
   reports the full input size and \code{attr(, "n_usable")} the denominator.
+  \code{attr(, "policy")} carries the selection rule used. With
+  \code{policy = "two_sided"} (noul batches only; other inputs error), a row
+  counts as kept when \code{jif()} would DECIDE it under the two-sided
+  \code{confidence_floor} window (either tail clears the floor) rather than
+  only when its probability clears the floor from above; this is the coverage
+  the decision policy actually delivers, computed by the same internal helper
+  so the curve and the evaluator cannot drift (external audit r2 finding 3:
+  at floor 0.7 the policy decides p = 0.01 AND p = 0.99, while a one-sided
+  curve reported 50\%). With the default \code{"positive"} the statistic is
+  the share of usable rows with \code{p >= floor} -- a positive-tail selection
+  view, not a decision coverage.
   \code{pos_rate} is not correctness: classifying \code{p = (0.2, 0.8)}
   against \code{truth = (0, 1)} at floor 0 gives prevalence 0.5 even though
   both threshold-0.5 decisions are correct. A warning fires when no row is

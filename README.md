@@ -98,14 +98,19 @@ For a long batch, pass `cache = "path.rds"`. Each completed chunk is saved;
 a later call skips those rows without new requests. If interrupted mid-chunk,
 that chunk may need to run again. Rows with failed requests or invalid answers
 rerun by default (`Rjif.cache_rerun_errors = TRUE`); set it to FALSE to retain
-failures. Completed policy abstentions are reused. The cache refuses changes
-to the full question and criteria, requested model, row count, threshold, or
-floor. `attr(df, "n_resumed")` counts reused rows.
+failures. Completed policy abstentions are reused. The cache binds to the
+full question and criteria, requested model, row count, threshold, floor, and
+an MD5 digest of the state vector's contents and order: reorder or correct an
+extract and the cache REFUSES (error, zero new calls, prior file left intact)
+instead of silently re-attaching old judgments to the wrong records. Point
+`cache` at a fresh path when you mean to start over. `attr(df, "n_resumed")`
+counts reused rows.
 
-Keep the state vector unchanged and in the same order: cache rows are matched
-by position, not content. Use one writer per cache path. The file contains
-question text, criteria, run settings, and results in row order. It does not
-store states, but can still disclose your data; protect it accordingly.
+Use one writer per cache path: rows are matched by position, and the digest
+detects a changed vector but cannot say which row moved. The file contains
+question text, criteria, run settings, and results in row order. It stores no
+plaintext states (only their digest) but can still disclose your data; protect
+it accordingly.
 
 ## Checking calibration
 
@@ -119,6 +124,10 @@ reliability_curve(df)   # per bin: mean predicted probability vs observed freque
 ece(df)                 # one summary number: expected calibration error
 selection_curve(df)     # as you raise the floor: what share of rows do you
                         # keep, and what's the event rate among them?
+                        # policy = "two_sided" (noul batches) instead counts
+                        # the rows jif()'s two-sided floor actually DECIDES
+                        # (either tail), so the curve and the decision policy
+                        # can never disagree
 ```
 
 Know what they are. `ece()` is a point estimate using the classic equal-width
@@ -222,11 +231,18 @@ jif("the patient was hospitalized for six days after the infusion",
 
 ## Tests
 
-`Rscript tests/smoke.R` runs 184 offline assertions against the mock
+`Rscript tests/smoke.R` runs 227 offline assertions against the mock
 transport and scripted fake responses: the abstention behavior, the API
 response contract (including the live-verified continuous-score round trip),
 malformed-usage handling, credential-retention boundaries, and the calibration
-analytics.
+analytics. `tests/jifelse-laziness.R` adds 20 arm-evaluation assertions (exactly
+one branch element per routing decision, including mixed literal/prebuilt
+maps); `tests/r14-regressions.R` adds 51 audit-gate assertions, and on
+Unix-like systems runs them against real loopback HTTP fixtures (429/529
+retries, Retry-After waits, fractional timeouts). That block skips on Windows
+(needs fork), so on Windows either drive the loopback server recipe from the
+audit notes or let CI carry it. All three suites also run inside
+`R CMD check`.
 
 ## Why "Rjif"
 

@@ -1192,6 +1192,23 @@ expect("f3: floor at or below threshold keeps single-sided behavior exactly",
 expect("f3: p=0.49 under floor 0.7 still abstains (the floor is not bypassed)",
        withr_options(Rjif.transport = forged_noul(0.49),
                      isTRUE(jif_abstained(jif("s", "x", confidence_floor = 0.7)))))
+# r2 finding 4: exact negative cutoffs must be INCLUSIVE despite binary floats.
+# 1-0.8 = 0.19999999999999996 and 1-0.9 = 0.09999999999999998, so p=0.2 (floor
+# 0.8) and p=0.1 (floor 0.9) abstained on the pre-fix code; the .7/.3 pair
+# passed only because 1-0.7 = 0.30000000000000004 lands above the cutoff.
+expect("r2-4: exact negative cutoff p=0.2 under floor 0.8 decides FALSE (was NA)",
+       withr_options(Rjif.transport = forged_noul(0.2),
+                     isFALSE(jif("s", jev_noul_q("x"), confidence_floor = 0.8))))
+expect("r2-4: exact negative cutoff p=0.1 under floor 0.9 decides FALSE (was NA)",
+       withr_options(Rjif.transport = forged_noul(0.1),
+                     isFALSE(jif("s", jev_noul_q("x"), confidence_floor = 0.9))))
+expect("r2-4: the guard stays far below API granularity -- p=0.21/floor 0.8 still abstains",
+       withr_options(Rjif.transport = forged_noul(0.21),
+                     isTRUE(jif_abstained(jif("s", jev_noul_q("x"), confidence_floor = 0.8)))))
+expect("r2-4: batch path shares the inclusive cutoff (jev_score_many p=0.2/floor 0.8 -> FALSE)",
+       { b <- withr_options(Rjif.transport = forged_noul(0.2),
+              jev_score_many("s1", jev_noul_q("x"), confidence_floor = 0.8))
+         isFALSE(b$decision[[1]]) && !nzchar(b$error[[1]]) })
 expect("f3: choice/score floors stay single-sided (1-p is not evidence there)",
        { tc <- function(body) list(answers = list(q = list(
            type = "choice", choice = "a", confidence = 0.4,
@@ -1230,6 +1247,26 @@ expect("f2: a score batch's p is REFUSED as an event probability by default",
              err_msg(reliability_curve(score_frame)), fixed = TRUE))
 expect("f2: ece() and selection_curve() share the same gate",
        throws(ece(score_frame)) && throws(selection_curve(score_frame)))
+# r2 finding 3: with the two-sided policy live, the DEFAULT curve kept
+# reporting one-sided coverage (fixture: p=.01/.99 at floor .7 -> policy
+# decides BOTH rows, curve said 50%). The fix: an explicit policy argument
+# that reuses the evaluator's window helper.
+expect("r2-3: two_sided policy reports the evaluator's real coverage (was 0.5)",
+       { d <- structure(data.frame(p = c(0.01, 0.99), truth = c(0, 1)),
+                        question_type = "noul")
+         sc1 <- selection_curve(d, floor_seq = 0.7)
+         sc2 <- selection_curve(d, floor_seq = 0.7, policy = "two_sided")
+         identical(sc1$coverage, 0.5) &&            # default view unchanged
+           identical(sc2$coverage, 1.0) && identical(sc2$escalated, 0) &&
+           identical(attr(sc2, "policy"), "two_sided") })
+expect("r2-3: two_sided cutoffs are inclusive (p=0.2 exactly at floor 0.8 counts as decided)",
+       { d <- structure(data.frame(p = 0.2, truth = 0), question_type = "noul")
+         identical(selection_curve(d, floor_seq = 0.8, policy = "two_sided")$coverage, 1) })
+expect("r2-3: two_sided refuses non-noul batches (1-p is not evidence for a named-option pick)",
+       grepl("requires a noul batch",
+             err_msg(selection_curve(structure(data.frame(p = c(0.2, 0.8), truth = c(0, 1)),
+                                               question_type = "score"),
+                                     policy = "two_sided"))))
 expect("f2: allow_type = 'score' opts in WITH a warning naming the quantity",
        { w <- warn_msg(reliability_curve(score_frame, allow_type = "score"))
          rc <- suppressWarnings(reliability_curve(score_frame,
@@ -1274,10 +1311,18 @@ expect("f4: choice answer contradicting its own argmax is rejected (probe 3)",
          { d <- suppressWarnings(withr_options(Rjif.transport = tr,
                jif("s", jev_choice_q("i", c(a = "1", b = "2")))))
            length(d) == 1L && is.na(d) } })
-expect("f4: a 0.02 winner gap at the rounding boundary is still ACCEPTED",
+expect("r2-5: a strictly lower displayed winner is REJECTED (tolerance tightened to 0)",
        { tr <- function(body) list(answers = list(q = list(
            type = "choice", choice = "a", confidence = 0.5,
            probabilities = list(a = 0.49, b = 0.51))))
+         a <- suppressWarnings(withr_options(Rjif.transport = tr,
+               jev_eval("s", list(q = jev_choice_q("i", c(a = "1", b = "2")))))$q)
+         is.na(jvalue(a)) && grepl("trails the top option", a$contract,
+                                   fixed = TRUE) })
+expect("r2-5: an exact displayed TIE on the maximum still decides (ties are legal argmaxes)",
+       { tr <- function(body) list(answers = list(q = list(
+           type = "choice", choice = "a", confidence = 0.5,
+           probabilities = list(a = 0.5, b = 0.5))))
          a <- suppressWarnings(withr_options(Rjif.transport = tr,
                jev_eval("s", list(q = jev_choice_q("i", c(a = "1", b = "2")))))$q)
          identical(jvalue(a), "a") && is.na(a$contract) })

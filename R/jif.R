@@ -149,7 +149,14 @@ jif <- function(state, question, ..., threshold = 0.5,
     if (is.na(p)) return(list(dec = NA, reason = "confidence unavailable with a floor set"))
     neg_cut <- 1 - confidence_floor
     if (p >= confidence_floor) return(list(dec = TRUE, reason = NA_character_))
-    if (p <= neg_cut) return(list(dec = FALSE, reason = NA_character_))
+    # Inclusive negative cutoff needs the same 1e-9 guard as the contract
+    # tolerances (external audit r2 finding 4): 1-0.8 evaluates to
+    # 0.19999999999999996, so a probability of exactly 0.2 failed `p <= 1-f`
+    # and abstained despite the docs (and our own reason string) calling the
+    # cutoff inclusive. floor .7/.3 passed only because 1-0.7 lands ABOVE 0.3
+    # -- luck, not correctness. The guard is far below the API's 2-decimal
+    # granularity (0.21 still abstains; tested both sides).
+    if (p <= neg_cut + 1e-9) return(list(dec = FALSE, reason = NA_character_))
     return(list(dec = NA, reason = paste0(
       "probability ", formatC(p, format = "f", digits = 3),
       " is in the uncertain middle of the two-sided confidence_floor ",
