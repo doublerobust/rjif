@@ -196,6 +196,11 @@ selection_curve <- function(df, floor_seq = seq(0, 0.95, by = 0.05),
               "it answers 'how well does concentration predict the outcome?' ",
               "- which is usually not calibration. Quote it as such.",
               call. = FALSE)
+    } else {
+      warning("Rjif: `p` here is the probability of the SELECTED option, not ",
+              "of a fixed binary event. For selected-class calibration, truth ",
+              "must indicate whether that selected option was correct.",
+              call. = FALSE)
     }
     return(invisible(TRUE))
   }

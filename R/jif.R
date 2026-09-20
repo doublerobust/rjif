@@ -52,9 +52,7 @@ jif <- function(state, question, ..., threshold = 0.5,
   threshold <- .single_number(threshold, "threshold")
   confidence_floor <- .single_number(confidence_floor, "confidence_floor",
                                      allow_na = TRUE)
-  # Consistent NA-floor semantics across the package (audit m1): an NA floor
-  # means "refuse to decide" -> abstain always, same as jev_score_many().
-  if (is.na(confidence_floor)) confidence_floor <- Inf
+  # Keep NA as a policy value so diagnostics never expose an Inf sentinel.
   .check_floor_range(confidence_floor)
   ans <- jev_eval(state, list(q = q), model = model)$q
 
@@ -141,6 +139,8 @@ jif <- function(state, question, ..., threshold = 0.5,
 # FALSE below 1-floor, abstain in between. All other combinations keep the
 # single-sided policy: gate jprob() against the floor, then threshold.
 .decide_answer <- function(ans, q, threshold, confidence_floor) {
+  if (is.na(confidence_floor)) return(list(
+    dec = NA, reason = "confidence_floor is NA; refusing to decide"))
   v <- jvalue(ans)
   if (is.na(v)) return(list(dec = NA, reason = "no answer value from the API"))
   if (q$type == "noul" && confidence_floor > threshold &&
@@ -225,7 +225,6 @@ jev_score_many <- function(state_vec, question, ...,
   threshold <- .single_number(threshold, "threshold")
   confidence_floor <- .single_number(confidence_floor, "confidence_floor",
                                      allow_na = TRUE)
-  if (is.na(confidence_floor)) confidence_floor <- Inf  # NA floor = abstain always
   .check_floor_range(confidence_floor)
   if (!is.character(state_vec) && !is.factor(state_vec)) {
     stop("Rjif: state_vec must be a character (or factor) vector.", call. = FALSE)
