@@ -280,15 +280,24 @@ jev_score_many <- function(state_vec, question, ...,
   # evaluated_at, row_source, score_value, probs) -- round 3 carryover 1.
   # An old v4 cache would ALSO fail the frame-shape check, but the version
   # tag makes the reason explicit in the refusal.
-  # The model entry goes in BARE (.bare_char, audit r6b R6b-B1): the
-  # fingerprint is serialized from the caller's raw `model` ARGUMENT, so an
-  # attributes-carrying model string used to smuggle arbitrary payloads into
-  # the saved cache (inherited from the v4 mechanism, not introduced by the
-  # provenance feature). The value is preserved -- distinct aliases keep
-  # distinct resume identities -- only the attribute margins are stripped.
-  cache_fingerprint <- serialize(list(version = 5L, question = unclass(q),
-    model = .bare_char(model), n = n, threshold = threshold,
-    floor = confidence_floor,
+  # Model identity (audit r6b R6b-B1 / r6c R6c-B1 -- read both before
+  # "fixing" this again): storing the raw `model` ARGUMENT smuggled
+  # attribute payloads into the saved cache (r6b); storing the SCRUBBED
+  # string merged two distinct aliases whenever display redaction rewrote
+  # both into one marker, letting a second alias resume the first alias's
+  # decisions with zero calls (r6c). The answer is neither: the resume
+  # identity is an MD5 digest of the model as it goes on the wire
+  # (charToRaw of the same value jev_eval puts in the request body;
+  # attributes are part of neither -- .state_digest discards them like any
+  # other function, so the smuggled-attribute payload can never even seed
+  # the digest), and the readable entry is the
+  # scrubbed bare string, display-only and explicitly NOT authoritative.
+  # Version 6L: the fingerprint gains the model_id digest entry (r6c
+  # R6c-B1); 5L-era caches predate the whole pre-release feature, so they
+  # are refused as stale.
+  cache_fingerprint <- serialize(list(version = 6L, question = unclass(q),
+    model = .bare_char(model), model_id = .model_identity(model),
+    n = n, threshold = threshold, floor = confidence_floor,
     states = .state_digest(state_vec)),
     NULL, version = 2)
   dec <- rep(NA, n); ps <- rep(NA_real_, n); cf <- rep(NA_real_, n)
@@ -424,16 +433,30 @@ jev_score_many <- function(state_vec, question, ...,
         # digits and loses bits (audit r6 R6-B2 caught the old claim).
         # Longer text is the right trade for a provenance column: it must
         # be byte-stable AND bit-exact.
-        # Collision policy (audit r6b R6b-B2): display redaction can merge
-        # two distinct Choice labels into ONE name. The probs_json column is
-        # written with make.unique(sep=".") names (jsonlite refuses to
-        # serialize duplicate object keys); the retained answer object keeps
-        # the raw merged names. Renaming the answer path the same way makes
-        # the two representations of one distribution IDENTICAL, which is
-        # what a provenance accessor must guarantee.
-        if (!is.null(names(ap))) names(ap) <- make.unique(names(ap), sep = ".")
-        probs_json[j] <- jsonlite::toJSON(as.list(ap), digits = 17,
-                                          auto_unbox = TRUE, na = "null")
+        # Storage shape (audit r6b R6b-B2 / r6c R6c-B2 -- the third attempt
+        # at a collision policy, read both findings before changing it):
+        # display redaction can legitimately MERGE two distinct option
+        # labels into one name, and any suffix-renaming scheme can be
+        # defeated by adversarial labels (make.unique itself output a
+        # duplicate when a ".1"-suffixed label already existed, and jsonlite
+        # then re-suffixed the column side differently from the answer
+        # side). Objects cannot represent duplicate keys honestly. So the
+        # column is NOT a name-keyed object: it is {"p": [[name, value],
+        # ...]} -- an array of pairs under a fixed key (a BARE pair array
+        # would be ambiguous for a one-entry distribution like {"a":1},
+        # which decodes as a pair too). Names are stored byte-exactly,
+        # duplicates and all; jprobs() decodes the same pairs. Both
+        # representations of one distribution are now identical by
+        # construction, for any labels. After a redaction merge the names
+        # are ambiguous BY NATURE; no probability may be looked up by a
+        # merged name -- frame$p holds the selected value, bound before
+        # redaction, and is authoritative.
+        apn <- names(ap)
+        if (is.null(apn)) apn <- rep(NA_character_, length(ap))
+        probs_json[j] <- as.character(jsonlite::toJSON(
+          list(p = lapply(seq_along(ap), function(i)
+            list(apn[[i]], ap[[i]]))),
+          digits = 17, auto_unbox = TRUE, na = "null"))
       }
       # identical policy to jif() via .decide_answer() (audit finding 3):
       # two-sided noul window when floor > threshold, single-sided otherwise.
@@ -524,6 +547,20 @@ jev_score_many <- function(state_vec, question, ...,
   d <- openssl::md5(as.raw(payload))
   list(digest = paste(format(d), collapse = ""), n = length(state_vec))
 }
+
+# Cache identity of the model argument (audit r6c R6c-B1). The readable
+# fingerprint entry must be scrubbed for display (r6b R6b-B1: raw
+# attributes smuggled payloads into the saved cache), but the SCRUBBED
+# string must never be the RESUME IDENTITY: display redaction merges
+# distinct aliases ("Bearer option_alpha" and "Bearer option_beta" both
+# become "Bearer [REDACTED]"), which used to let a second alias resume the
+# first alias's decisions with zero calls. Identity is therefore the same
+# whole-content digest used for states (charToRaw of the model value
+# exactly as jev_eval puts it in the request body; function argument
+# passing discards attributes, so a smuggled attribute payload can never
+# even seed the digest), and the readable entry stays the scrubbed bare
+# string, display-only and explicitly NOT authoritative.
+.model_identity <- function(model) .state_digest(as.character(unname(model)))
 
 .cache_valid <- function(df, n, fingerprint) {
   cols <- c("decision", "option", "p", "confidence", "abstained", "error",

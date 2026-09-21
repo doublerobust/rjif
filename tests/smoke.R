@@ -1595,10 +1595,10 @@ expect("r3-1: an old-version cache identity is never trusted (forged on-disk; po
          # that passed vacuously even on old code). The frame KEEPS the
          # current column shape, so the refusal can only come from the
          # version tag inside the identity -- the exact isolation test.
-         # (Version numbers advance with each audit round; forge 5L -> 3L.)
+         # (Version numbers advance with each audit round; forge 6L -> 3L.)
          disk <- readRDS(cf)
          fp <- unserialize(attr(disk, "cache_fingerprint"))
-         stopifnot(identical(fp$version, 5L))
+         stopifnot(identical(fp$version, 6L))
          cur_version <- fp$version
          fp$version <- 3L
          old <- disk; attr(old, "cache_fingerprint") <- serialize(fp, NULL, version = 2)
@@ -1860,13 +1860,13 @@ expect("r6b2 collision: redaction-merged Choice labels give ONE consistent distr
        local({
          # R6b-B2: a valid Choice whose distinct labels both contain a
          # "Bearer <token>" pattern collapses to the same redacted name at
-         # the display boundary. jsonlite refuses duplicate JSON object keys
-         # and used to silently invent ".1" on the column side only, so
-         # jprobs(answer) and jprobs(probs_json) were different vectors and
-         # the wrong entry survived cache/resume. Policy now: make.unique
-         # applied at BOTH write and read, so the two representations are
-         # identical, and the frame keeps its decision p from the
-         # pre-redaction binding (never reconstructed by name here).
+         # the display boundary. A JSON object cannot store duplicate keys,
+         # so the column now holds the distribution as {"p": [[name, value],
+         # ...]} pairs (r6c fix: the earlier make.unique renaming was itself
+         # defeated by adversarial labels). Names are stored EXACTLY,
+         # duplicates and all, so jprobs(answer) and jprobs(probs_json) are
+         # identical by construction; the frame's p stays the authoritative
+         # selected value, bound before redaction.
          labels <- c("Bearer option_alpha", "Bearer option_beta")
          q <- jev_choice_q("x", stats::setNames(list("d1", "d2"), labels))
          tr <- function(body) list(model = "m", usage = list(input_tokens = 1L),
@@ -1877,8 +1877,10 @@ expect("r6b2 collision: redaction-merged Choice labels give ONE consistent distr
          d <- withr_options(Rjif.transport = tr, jev_score_many("n", q, cache = cf))
          a <- withr_options(Rjif.transport = tr, jev_eval("n", list(q = q)))$q
          pj <- jprobs(d$probs_json[[1]]); pa <- jprobs(a)
+         # both names are the SAME merged label by design (duplication is
+         # honest here; inventing ".1" was the old defect)
          same_len <- length(pj) == 2L && identical(unname(pj), c(0.1, 0.9)) &&
-           !anyDuplicated(names(pj))
+           identical(names(pj), names(pa))
          decision_ok <- identical(d$decision[[1L]], FALSE) || !is.na(d$decision[[1L]])
          # resume must reproduce the SAME names and values (the defective
          # JSON used to persist through the cache)
@@ -1888,6 +1890,67 @@ expect("r6b2 collision: redaction-merged Choice labels give ONE consistent distr
          resumed <- identical(r$probs_json[[1]], d$probs_json[[1]]) &&
            identical(jprobs(r$probs_json[[1]]), pj) && calls == 0L
          identical(pj, pa) && same_len && decision_ok && resumed
+       }))
+
+expect("r6c adversarial labels: an existing '.1'-suffixed label cannot break name agreement",
+       local({
+         # R6c-B2's exact fixture: one label literally contains the
+         # redaction marker + ".1", two more merge into it after redaction.
+         # make.unique output a DUPLICATE for this input and jsonlite then
+         # re-suffixed the column side differently -- the pair encoding has
+         # no renaming step to defeat.
+         labs <- c("\u9009\u9879 Bearer [REDACTED].1",
+                   "\u9009\u9879 Bearer option_alpha",
+                   "\u9009\u9879 Bearer option_beta")
+         q <- jev_choice_q("x", stats::setNames(list("d1", "d2", "d3"), labs))
+         tr <- function(body) list(model = "m", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "choice", choice = labs[[3L]],
+             confidence = 0.9,
+             probabilities = stats::setNames(list(0.1, 0.2, 0.7), labs))))
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         d <- withr_options(Rjif.transport = tr, jev_score_many("n", q, cache = cf))
+         a <- withr_options(Rjif.transport = tr, jev_eval("n", list(q = q)))$q
+         pj <- jprobs(d$probs_json[[1]]); pa <- jprobs(a)
+         agree <- identical(pj, pa) && identical(unname(pj), c(0.1, 0.2, 0.7)) &&
+           identical(names(pj), names(pa))
+         p_ok <- identical(d$p[[1L]], 0.7)  # selected value bound pre-redaction
+         resumed <- identical(withr_options(Rjif.transport = tr,
+                       jev_score_many("n", q, cache = cf))$probs_json[[1L]],
+                     d$probs_json[[1L]])
+         agree && p_ok && resumed
+       }))
+
+expect("r6c-B1 model identity: two redaction-merged aliases never share a cache",
+       local({
+         # R6c-B1: .bare_char() on the fingerprint's readable model entry
+         # merged "Bearer option_alpha" and "Bearer option_beta" into one
+         # resume identity, so the second alias silently picked up the
+         # FIRST alias's cached decisions with zero calls. The fingerprint
+         # now carries model_id = digest of the model as sent; the readable
+         # entry stays scrubbed for display but is not the identity.
+         seen <- 0L
+         tr1 <- function(body) { seen <<- seen + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = if (seen == 1L) 0.9 else 0.1))) }
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         d1 <- withr_options(Rjif.transport = tr1,
+                jev_score_many("s", "x", model = "Bearer option_alpha", cache = cf))
+         e <- tryCatch({ withr_options(Rjif.transport = tr1,
+                          jev_score_many("s", "x", model = "Bearer option_beta", cache = cf))
+                         "" },
+                       error = conditionMessage)
+         # the second, DIFFERENT alias must REFUSE the first's cache (model
+         # differs) rather than resume it: error text or fresh call, never
+         # n_resumed == 1 with the first alias's decision
+         refused <- grepl("does not match", e, fixed = TRUE)
+         # and the readable fingerprint entry is still the SCRUBBED string
+         disk <- readRDS(cf)
+         fp <- unserialize(attr(disk, "cache_fingerprint"))
+         clean <- grepl("[REDACTED]", fp$model, fixed = TRUE) &&
+           is.null(attributes(fp$model)) &&
+           identical(fp$model_id$digest,
+                     Rjif:::.model_identity("Bearer option_alpha")$digest)
+         identical(d1$model[[1L]], "m") && refused && clean
        }))
 
 cat("\n")

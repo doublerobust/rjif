@@ -21,10 +21,13 @@ promises the 0.0.1 docs already made.
   the `$q` extraction previously dropped with the envelope. Motivation: a
   cached run interrupted across a model-alias change can now distinguish
   day-one rows from day-two rows; before, nothing in the output revealed it.
-- Cache fingerprint version 5L (old v4 caches are refused as before; the
+- Cache fingerprint version 6L (old caches are refused as before; the
   version tag carries the reason for anyone inspecting the serialized
   cache, while the user-facing error stays the generic "stale cache"
-  message).
+  message). v6 adds the `model_id` whole-content digest that makes the
+  resume identity independent of the display-scrubbed model string
+  (r6c R6c-B1); v5 had the per-row provenance columns; 5L-era caches
+  predate the whole pre-release feature and are refused as stale.
 
 ### Breaking
 
@@ -58,15 +61,22 @@ promises the 0.0.1 docs already made.
 - `DESCRIPTION` gains `openssl (>= 0.8)` in Imports. It is already an
   unconditional dependency of `httr`, so no new software is installed by this.
 
-### Fixed (external audits of the provenance feature, rounds 6 and 6b)
+### Fixed (external audits of the provenance feature, rounds 6, 6b and 6c)
 
 - Provenance strings (`model_requested`, `model_returned`, the batch
   `model` column) are scrubbed AND stripped of all attributes before
   attachment: an attributes-carrying `model` argument can no longer
   smuggle arbitrary strings into retained answer objects, serialized
-  results, or saved caches (r6 R6-B1; the same bare-value rule now also
-  applies to the model entry inside the cache fingerprint, an inherited
-  v4-era retention path, r6b R6b-B1).
+  results, or saved caches (r6 R6-B1). The cache fingerprint's model
+  entry follows the same retention rule but with a different mechanism
+  (r6b R6b-B1 fixed the leak; r6c R6c-B1 fixed that fix -- see below):
+  the readable entry is scrubbed and bare, while the resume IDENTITY is
+  a whole-content MD5 digest of the model exactly as it goes on the
+  wire. Using the scrubbed string itself as identity had merged two
+  distinct aliases whenever display redaction rewrote both into one
+  marker, letting a second alias silently resume the first alias's
+  cached decisions with zero calls (an inherited v4-era retention path
+  surfaced by the new tests, not introduced by this feature).
 - `probs_json` is written with 17 significant digits: jsonlite's
   `digits = NA` caps at 15 and silently lost bits for non-dyadic
   normalized probabilities (r6 R6-B2). Positive doubles re-parses
@@ -78,11 +88,17 @@ promises the 0.0.1 docs already made.
   (r6 R6-B3). The answer itself is still accepted; the alias remains
   visible in `model_requested`.
 - Redaction-merged Choice labels no longer produce two disagreeing
-  representations of one distribution: the stored JSON and the answer
-  object are uniquified with the same `make.unique` suffixes, so
-  `jprobs()` is identical whichever side parses, fresh and after
-  resume (r6b R6b-B2). Selected probabilities stay looked up from the
-  pre-redaction binding (`p` column), never by a merged name.
+  representations of one distribution. The round-6b answer (rename both
+  sides with `make.unique`) was itself defeated by an adversarial label
+  (r6c R6c-B2: a label already ending in the redaction marker + ".1"
+  made `make.unique` output a duplicate, and the JSON column was
+  renamed once more on the way out -- names diverged between the answer
+  object and the cache column). The column is now a JSON array of
+  [name, value] pairs under a fixed key, names stored byte-exactly,
+  duplicates and all, and `jprobs()` decodes the same pairs: identical
+  by construction for any labels, fresh and after resume. Merged names
+  remain ambiguous by nature, so selected probabilities stay looked up
+  from the pre-redaction binding (`p` column), never by a merged name.
 
 ### Changed
 

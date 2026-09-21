@@ -1054,25 +1054,42 @@ jprobs <- function(x) {
     # them, and an unnamed distribution is a provenance column with its
     # labels lost. Carry the names across the coercion by hand. NA values
     # are kept as-is: provenance reports what the vendor sent, it does not
-    # filter it.
-    # Collision policy (audit r6b R6b-B2): display redaction can merge two
-    # distinct Choice labels into ONE name. The probs_json column is written
-    # with make.unique(sep=".") names (jsonlite refuses to serialize
-    # duplicate object keys); the retained answer object keeps the raw
-    # merged names. Renaming the answer path the same way makes the two
-    # representations of one distribution IDENTICAL, which is what a
-    # provenance accessor must guarantee.
+    # filter it. Names are returned EXACTLY as stored -- duplicates
+    # included: display redaction can legitimately merge two distinct
+    # Choice labels, and any de-duplication on one side only made the
+    # answer object and the probs_json column disagree (audit r6b
+    # R6b-B2 / r6c R6c-B2; make.unique was the second failed attempt --
+    # adversarial labels defeated it too). Merged names are ambiguous by
+    # nature; frame$p holds the pre-redaction selected value.
     flat <- unlist(v, recursive = TRUE)
     out <- suppressWarnings(as.numeric(flat))
-    nms <- names(flat)
-    if (!is.null(nms)) nms <- make.unique(nms, sep = ".")
-    names(out) <- nms
+    names(out) <- names(flat)
     out
   }
   if (inherits(x, "jev_answer")) return(keep(x$probs))
   if (is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)) {
     parsed <- tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE),
                        error = function(e) NULL)
+    # probs_json shape (see .cache stamping): {"p": [[name, value], ...]}.
+    # A JSON object cannot honestly store duplicate keys, so the
+    # distribution travels as pairs under the fixed key "p"; the fixed key
+    # also keeps a one-entry pair array from being ambiguous with an
+    # object. Decode back to a named vector with the names byte-exact.
+    if (is.list(parsed) && !is.null(parsed[["p"]]) && is.list(parsed[["p"]])) {
+      prs <- parsed[["p"]]
+      shaped <- length(prs) > 0L && all(vapply(prs, function(p)
+        is.list(p) && length(p) == 2L &&
+          (is.null(p[[1L]]) || (is.character(p[[1L]]) && length(p[[1L]]) == 1L)),
+        logical(1)))
+      if (shaped) {
+        nms <- vapply(prs, function(p) p[[1L]] %||% NA_character_, NA_character_)
+        vals <- vapply(prs, function(p) {
+          v <- p[[2L]]
+          if (is.null(v)) NA_real_ else suppressWarnings(as.double(v[[1L]]))
+        }, NA_real_)
+        return(stats::setNames(vals, nms))
+      }
+    }
     return(keep(parsed))
   }
   NULL

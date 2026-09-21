@@ -119,9 +119,14 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
   validator's normalized probability distribution as a 17-significant-digit
   JSON string that re-parses bit-exactly, parseable with
   \code{\link{jprobs}}; \code{NA} for Noul and for rows without one).
-  When display redaction merges distinct option labels, the stored keys are
-  uniquified (\code{.1} suffix) exactly as \code{\link{jprobs}} reports
-  them, so the column and the answer object never disagree (audit r6b).
+ Distribution names are stored byte-exactly, duplicates included: display
+ redaction can merge two distinct option labels into one name, and the
+ \code{\{"p": [[name, value], ...]\}} pair encoding keeps the column and
+ the retained answer's \code{\link{jprobs}} identical for ANY labels (a
+ JSON object cannot honestly carry duplicate keys, and every renaming
+ scheme tried was defeated by adversarial labels -- audit r6b/r6c). After
+ a merged name, look probabilities up positionally; the frame's \code{p}
+ is bound before redaction and is the authoritative selected value.
   Together they distinguish rows judged before and after a model alias
   changed underneath an interrupted cached run. Attributes
   \code{n_abstained} and \code{question_type} summarise the run,
