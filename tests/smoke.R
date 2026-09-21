@@ -2149,6 +2149,50 @@ expect("r6e-m2 question identity: bytes-marked question text fails closed, never
            }), TRUE)
        }))
 
+expect("r6e gate: model must be a single non-NA string; never a wire shape the API cannot take",
+       local({
+         # Author self-audit after round 6e: before the gate, jev_eval sent
+         # model=NULL as {"model":{}} and model=5 as {"model":5}, and the
+         # batch cache identity merged NULL with the empty LIST
+         # (charToRaw digests both as nothing) while the wire distinguishes
+         # {} and []. The gate rejects every non-string, NA, multi-element,
+         # bytes-marked, and invalid-byte model BEFORE any transport call;
+         # strings flow through untouched (r6b3's vendor-side envelopes are
+         # unaffected -- that finding is about the RESPONSE model, this is
+         # about the REQUEST model).
+         reached <- 0L
+         tr <- function(body) { reached <<- reached + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         b <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(b) <- "bytes"
+         bad <- list(NULL, 5L, c("a", "b"), NA, NA_character_, "", list(),
+                     list(name = "m"), b, rawToChar(as.raw(c(0xff, 0xfe))))
+         refused <- vapply(bad, function(m) {
+           e <- tryCatch({ withr_options(Rjif.transport = tr,
+                             jev_eval("s", list(q = jev_noul_q("q")), model = m))
+                           "" },
+                         error = conditionMessage)
+           nzchar(e)
+         }, logical(1))
+         # the cache path refuses too, before any call
+         batch_refused <- local({
+           seen <- 0L
+           tr2 <- function(body) { seen <<- seen + 1L
+             list(model = "m", usage = list(input_tokens = 1L),
+                  answers = list(q = list(type = "noul", noul = 0.9))) }
+           e <- tryCatch({ withr_options(Rjif.transport = tr2,
+                             jev_score_many("s", "x", model = NULL)); "" },
+                         error = conditionMessage)
+           nzchar(e) && seen == 0L
+         })
+         # valid strings untouched (the r6b3 fixtures above prove the
+         # RESPONSE side; REQUEST-side strings must keep flowing)
+         ok <- withr_options(Rjif.transport = tr,
+                             jev_eval("s", list(q = jev_noul_q("q")),
+                                      model = "alias-a"))
+         all(refused) && batch_refused && reached >= 1L
+       }))
+
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))

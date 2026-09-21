@@ -56,7 +56,12 @@ jprobs(x)
     Choice takes 2 to 255 options.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
-    \code{"jev-latest"}.}
+    \code{"jev-latest"}. Must be a single non-NA, non-blank string:
+    \code{NULL}, numbers, vectors, blanks, and text marked
+    \code{Encoding == "bytes"} (which the request can never serialize) are
+    rejected before any call or cache lookup, because such arguments
+    otherwise collapse to one cache identity while serializing differently
+    on the wire.}
 
   \item{ans}{one answer object from \code{jev_eval()} or
     \code{\link{jif}} (class \code{jev_answer}).}

@@ -69,7 +69,9 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     security hash or de-identification.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
-    \code{"jev-latest"}.}
+    \code{"jev-latest"}. Must be a single non-NA, non-blank string; see
+    \code{\link{jev_eval}}. The check runs before any cache lookup, so a
+    fully-resumable batch never carries an unusable model identity either.}
 
   \item{state}{single non-NA string or non-empty structured list for
     \code{jmatch()} to route.}

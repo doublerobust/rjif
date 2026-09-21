@@ -57,7 +57,8 @@ jif_reason(x)
     gates, \code{> 1} gates everything.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option,
-    then \code{"jev-latest"}.}
+    then \code{"jev-latest"}. Must be a single non-NA, non-blank string;
+    see \code{\link{jev_eval}}.}
 
   \item{test}{a value returned by \code{jif()} (or any length-1 vector).}
 

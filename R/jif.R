@@ -274,6 +274,18 @@ jev_score_many <- function(state_vec, question, ...,
   # 'translating strings with "bytes" encoding is not allowed'). Rejecting
   # up front fails closed like the state path; same-model resume for
   # supported encodings is unaffected.
+  # Shape gate (author self-audit after round 6e, mirrored from jev_eval):
+  # the model must be a single non-NA, non-blank string BEFORE any cache
+  # work. NULL, "", whitespace-only and the empty list each reduce to
+  # character(0) inside .model_identity, so they all shared ONE cache
+  # identity, while a fresh call serialized them differently (NULL went to
+  # the wire as {"model":{}}, "" as {"model":""}, the list as
+  # {"model":[]}). A rows-entirely-resumed batch never reaches the
+  # jev_eval gate at all, so the check must live here too.
+  if (!(is.character(model) && length(model) == 1L && !is.na(model))) {
+    stop("Rjif: model must be a single non-NA string (the model name).",
+         call. = FALSE)
+  }
   model_bare <- as.character(unname(model))
   if (any(vapply(model_bare, function(s) {
         !is.na(s) && (Encoding(s) == "bytes" || !validEnc(s))
@@ -281,6 +293,15 @@ jev_score_many <- function(state_vec, question, ...,
     stop("Rjif: model is 'bytes'-marked or contains invalid byte ",
          "sequences and can never be serialized into a request; re-encode ",
          "it (e.g. stringi::str_conv or iconv) before scoring.",
+         call. = FALSE)
+  }
+  # Blank check AFTER the encoding check above (invalid bytes make grepl
+  # warn): NULL, "", whitespace-only and the empty list all collapse to
+  # character(0) inside .model_identity, so they share one cache identity
+  # while jev_eval behind a fresh call sends them differently.
+  if (!grepl("[^[:space:]]", model)) {
+    stop("Rjif: model must not be blank (whitespace-only): the cache ",
+         "identity collapses blank, empty, and NULL model arguments.",
          call. = FALSE)
   }
   n <- length(state_vec)

@@ -827,6 +827,35 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
   ok <- vapply(questions, inherits, logical(1), "jev_question")
   if (!all(ok)) stop("Rjif: build questions with jev_noul_q/jev_choice_q/jev_score_q.",
                      call. = FALSE)
+  # Model type gate (audit r6e follow-up, author self-audit): the API's
+  # model field is a model NAME -- a single non-NA, non-blank string.
+  # Before this check, model = NULL serialized on the wire as {"model":{}}
+  # and model = 5 as {"model":5}: requests that can never succeed, plus a
+  # cache identity that merged NULL with the EMPTY STRING (both reduce to
+  # character(0) before charToRaw) and with the empty list, while the wire
+  # sends {}, "" and [] for them -- three requests, one cache identity.
+  # Blank (whitespace-only) strings are rejected for the same reason.
+  # Strings marked "bytes" or carrying invalid byte sequences are rejected
+  # too (they can never serialize; the cache path checks again, this gate
+  # covers every call).
+  if (!(is.character(model) && length(model) == 1L && !is.na(model))) {
+    stop("Rjif: model must be a single non-NA string (the model name).",
+         call. = FALSE)
+  }
+  # Encoding check BEFORE the blank check: grepl() on an invalid-byte
+  # string warns ("input string 1 is invalid") while trying to translate,
+  # so a never-serializable model must be rejected first (and its error
+  # says why: re-encode, not "blank").
+  if (Encoding(model) == "bytes" || !validEnc(model)) {
+    stop("Rjif: model is 'bytes'-marked or contains invalid byte sequences ",
+         "and can never be serialized into a request; re-encode it (e.g. ",
+         "stringi::str_conv or iconv) before scoring.", call. = FALSE)
+  }
+  if (!grepl("[^[:space:]]", model)) {
+    stop("Rjif: model must not be blank (whitespace-only): the cache ",
+         "identity collapses blank, empty, and NULL model arguments.",
+         call. = FALSE)
+  }
 
   body <- list(state = state, model = model,
                questions = lapply(questions, function(q) unclass(q)))

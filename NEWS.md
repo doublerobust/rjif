@@ -21,6 +21,14 @@ promises the 0.0.1 docs already made.
   the `$q` extraction previously dropped with the envelope. Motivation: a
   cached run interrupted across a model-alias change can now distinguish
   day-one rows from day-two rows; before, nothing in the output revealed it.
+  `model` argument is now type-gated on every call (author self-audit after
+  round 6e): it must be a single non-NA, non-blank string. Before, `NULL`
+  went to the wire as `{"model":{}}` and `5` as `{"model":5}` -- requests
+  that can never succeed -- and `NULL`, `""`, whitespace-only and the empty
+  list all shared ONE cache identity (each reduces to `character(0)` before
+  digesting) while a fresh call serialized them differently; bytes-marked
+  and invalid-byte models are rejected before that identity is ever looked
+  up.
 - Cache fingerprint version 7L (old caches are refused as before; the
   version tag carries the reason for anyone inspecting the serialized
   cache, while the user-facing error stays the generic "stale cache"
