@@ -297,9 +297,13 @@ jev_score_many <- function(state_vec, question, ...,
   # attributes (names, metadata) stay allowed -- identity is a serializer
   # digest now, and the r6b smuggling test covers those.
   if (!identical(class(model), "character")) {
-    stop("Rjif: model must be a plain character scalar (class ",
-         paste(class(model), collapse = "/"), " changes or breaks the ",
-         "wire shape of the model name).", call. = FALSE)
+    # Mirror of the jev_eval gate (audit r6g R6g-B1: the class text is
+    # caller-supplied and must pass through .clean_error_text before it
+    # can reach an error message).
+    stop(.clean_error_text(paste0(
+           "Rjif: model must be a plain character scalar (class ",
+           paste(class(model), collapse = "/"), " changes or breaks the ",
+           "wire shape of the model name).")), call. = FALSE)
   }
   model_bare <- as.character(unname(model))
   if (any(vapply(model_bare, function(s) {
@@ -344,23 +348,23 @@ jev_score_many <- function(state_vec, question, ...,
   # alias's decisions with zero calls (r6c); hashing raw bytes missed that
   # a string whose Encoding is "bytes" can never be serialized by the
   # transport yet shared a digest with the UTF-8-marked copy of its bytes
-  # (r6e). The answer: bytes-marked and invalid-byte models are REJECTED up
-  # front (before any cache lookup or write, like states are), and the
-  # resume identity is .model_identity -- the whole-content digest of the
-  # model after the SAME declared-encoding -> UTF-8 conversion the JSON
-  # serializer performs, taken on the explicitly coerced bare string
-  # (as.character(unname(.)) is the coercion that drops attributes;
-  # argument passing itself RETAINS them -- auditor's identity-function
-  # control, r6d). The readable entry is the scrubbed bare string,
-  # display-only and explicitly NOT authoritative.
-  # Question identity (audit r6e, inherited v4 path, reported alongside):
-  # serialize(unclass(q)) stores native-encoded strings as locale-blind
-  # BYTES, so a question text that jsonlite would post as different words
-  # under two LC_CTYPE settings could resume its own cache unchanged across
-  # the locale change. .question_identity normalizes every character
-  # element with enc2utf8 BEFORE storing, so the fingerprint sees the same
-  # text the wire sends and a locale change between fill and resume now
-  # refuses.
+  # (r6e). The answer (final design, audit r6f): the resume identity is
+  # .model_identity -- the digest of the model EXACTLY as the transport's
+  # own jsonlite::toJSON renders it (same JSON_OPTS as the request body),
+  # so it cannot lag the serializer's dispatch rules; bytes-marked and
+  # invalid-byte models are additionally REJECTED up front by the gate in
+  # jev_eval/jev_score_many. The readable entry is the scrubbed bare
+  # string, display-only and explicitly NOT authoritative. Hand-written
+  # canonicalization (enc2utf8/as.character walks) was the 7L design and
+  # was replaced on purpose -- do not reintroduce it.
+  # Question identity (audit r6e inherited v4 path; rebuilt by r6f): the
+  # 7L story was that serialize(unclass(q)) stores native-encoded strings
+  # as locale-blind BYTES, so a question whose rendered words change with
+  # LC_CTYPE could resume its own cache across the flip. Under 8L the
+  # question entry is likewise the digest of the serializer's own output
+  # (.question_identity), so locale-blindness falls out of enc2utf8 of
+  # the rendered UTF-8 and a locale-driven wire change simply digests
+  # differently and refuses.
   # Version 6L: model_id digest entry (r6c R6c-B1). Version 7L: the
   # fingerprint digest inputs are the TRANSPORT-canonicalized model
   # (.model_identity, rejecting bytes-marked/invalid text -- r6e R6e-B1)
@@ -662,12 +666,17 @@ JSON_OPTS <- list(auto_unbox = TRUE, null = "null")
 # labels WHERE a never-sendable string sits, before any cache work.
 .wire_slot_scan <- function(x, where) {
   check_chr <- function(v, slot) {
+    # The slot path embeds caller-chosen names, which can carry the API
+    # key (audit r6g R6g-n1): scrub every message built from a slot.
+    slot <- .clean_error_text(slot)
     if (is.factor(v)) {
-      # jsonlite sends the LABELS; the levels are the wire text (r6f n1).
-      lv <- levels(v)
-      bad <- vapply(lv, function(s) !is.na(s) &&
+      # jsonlite sends the LABEL the value USES, not the whole level set:
+      # a bytes-marked UNUSED level renders nowhere on the wire, so
+      # validating it over-refuses a sendable question (audit r6g R6g-m1).
+      lv <- levels(v)[v]
+      bad <- any(vapply(lv, function(s) !is.na(s) &&
                                (Encoding(s) == "bytes" || !validEnc(s)),
-                   logical(1))
+                   logical(1)))
       if (any(bad)) {
         stop("Rjif: ", slot, " is a factor whose level labels are ",
              "'bytes'-marked or contain invalid byte sequences and can ",
@@ -692,6 +701,18 @@ JSON_OPTS <- list(auto_unbox = TRUE, null = "null")
   walk <- function(x, slot) {
     check_chr(x, slot)
     if (is.list(x)) {
+      # Only descend PLAIN lists. S3 [[ methods on classed "lists" can
+      # self-nest forever (POSIXlt's [[.POSIXlt hands back an object the
+      # walk recurses into again -- audit r6g R6g-m2 crashed the C stack,
+      # and a stack overflow is NOT catchable by tryCatch, so it kills the
+      # session instead of refusing). A classed object's wire bytes are
+      # whatever its asJSON method renders: the digest sees them, and if
+      # rendering fails, .question_identity's wrap refuses with a clean
+      # message. Slot naming is best-effort; it never runs ahead of the
+      # serializer's own view of the object.
+      if (!is.null(attr(x, "class")) && !identical(class(x), "list")) {
+        return(invisible(TRUE))
+      }
       nx <- names(x)
       if (!is.null(nx)) check_chr(nx, paste0(slot, "[names]"))
       for (i in seq_along(x)) {

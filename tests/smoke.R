@@ -2307,6 +2307,123 @@ expect("r6f-m1: serializer-based digests separate what the wire separates and me
        }))
 
 cat("\n")
+expect("r6g-B1/n1/m1/m2/B2: caller text scrubbed at gates, used-level-only factor check, POSIXlt safe, direct path pre-serializes",
+       local({
+         # Astra round 6g on 3a0ff1d (evidence: rjif-r6g-astra-evidence/
+         # findings-repro.R; every finding mirrored on the old build
+         # first). B1: the new class gate echoed a key-named class
+         # verbatim (stop() ran before .clean_error_text could see it).
+         # B2: the pre-transport serialization property held only for the
+         # DEFAULT transport -- a custom Rjif.transport callback was
+         # entered with a never-serializable body and its answer returned.
+         # m1: the factor check validated ALL levels, but jsonlite sends
+         # only the USED label, so an unused bad level over-refused a
+         # perfectly sendable question. m2: POSIXlt's self-nesting [[
+         # recursions crashed the slot walk with an UNcatchable C stack
+         # overflow. n1: criterion names (slot paths) could carry the key
+         # into a scan error. Closure: gate/slot/scan messages all run
+         # through .clean_error_text; the factor check sees the used
+         # level; the walk descends plain lists only; jev_eval pre-
+         # renders the body with JSON_OPTS before dispatching anywhere.
+         KEY <- "R6G_SYNTHETIC_OPAQUE_KEY_9Q7"
+         bstr <- rawToChar(as.raw(0xc3)); Encoding(bstr) <- "bytes"
+         md5of <- function(f) as.character(tools::md5sum(f))
+         wire <- function(x) as.character(do.call(jsonlite::toJSON,
+                       c(list(x), Rjif:::JSON_OPTS)))
+         entered <- 0L
+         tr <- function(body) { entered <<- entered + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+
+         # --- B2 + m1 + m2 inside one mock-transport scope ---
+         b2 <- m1 <- m2 <- FALSE
+         withr_options(Rjif.transport = tr, {
+           # B2: direct jev_eval refuses a never-serializable body
+           # BEFORE entering the callback...
+           qb <- jev_noul_q("q")
+           qb$extra <- structure(list(x = 1L), class = "never_serializable")
+           e <- tryCatch({ jev_eval("s", list(q = qb), model = "m"); NA_character_ },
+                         error = function(x) conditionMessage(x))
+           refused <- !is.na(e) && grepl("could not be serialized", e, fixed = TRUE)
+           # ...and a serializable direct call still reaches it once.
+           r <- jev_eval("s", list(q = jev_noul_q("q")), model = "m")
+           b2 <- refused && entered == 1L && isTRUE(jprob(r$q) == 0.9)
+
+           # m1: bytes-marked UNUSED level renders nowhere on the wire:
+           # no refusal, and the byte-identical clean twin resumes it.
+           f_ok <- structure(1L, levels = c("safe", bstr), class = "factor")
+           qf <- jev_noul_q("q", list(true = f_ok, false = "no"))
+           qc <- jev_noul_q("q", list(true = "safe", false = "no"))
+           same_wire <- identical(wire(unclass(qf)), wire(unclass(qc)))
+           n0 <- entered
+           e <- tryCatch({ jev_score_many("s", qf, model = "m"); NA_character_ },
+                         error = function(x) conditionMessage(x))
+           flows <- is.na(e) && entered == n0 + 1L
+           cf <- tempfile(fileext = ".rds")
+           jev_score_many("s", qc, model = "m", cache = cf)
+           n1 <- entered
+           e <- tryCatch({ jev_score_many("s", qf, model = "m", cache = cf); NA_character_ },
+                         error = function(x) conditionMessage(x))
+           twin_resume <- is.na(e) && entered == n1
+           # a USED bad level still refuses, with the slot named:
+           f_bad <- structure(2L, levels = c("safe", bstr), class = "factor")
+           e <- tryCatch(Rjif:::.question_identity(jev_noul_q("q", list(true = f_bad, false = "no"))),
+                         error = function(x) conditionMessage(x))
+           used_refuses <- nzchar(e) && grepl("question$criteria$true", e, fixed = TRUE)
+           m1 <- same_wire && flows && twin_resume && used_refuses
+
+           # m2: POSIXlt digests without the walk's C stack overflow,
+           # and the digest tracks the rendered wall time.
+           lt <- as.POSIXlt("2024-03-10 06:30:00", tz = "UTC")
+           ql <- jev_noul_q("q", list(true = lt, false = "no"))
+           qi1 <- NULL
+           e <- tryCatch({ qi1 <- Rjif:::.question_identity(ql); NA_character_ },
+                         error = function(x) conditionMessage(x))
+           digests <- is.na(e) && is.list(qi1) && nzchar(qi1$digest)
+           lt2 <- as.POSIXlt("2024-03-10 06:30:01", tz = "UTC")
+           qi2 <- Rjif:::.question_identity(jev_noul_q("q", list(true = lt2, false = "no")))
+           tracks <- !identical(qi1$digest, qi2$digest)
+           n2 <- entered
+           r <- jev_score_many("s", ql, model = "m")
+           m2 <- digests && tracks && entered == n2 + 1L
+         })
+
+         # --- B1 + n1: caller-named classes/slots scrubbed in errors ---
+         b1 <- n1res <- FALSE
+         withr_options(Rjif.transport = NULL, {
+           Sys.setenv(TYPESAFE_API_KEY = KEY)
+           keyed <- structure("m", class = KEY)
+           ok_modes <- TRUE
+           for (mode in c("direct", "fresh", "resume")) {
+             cf <- tempfile(fileext = ".rds")
+             if (mode == "resume") {
+               jev_score_many("s", jev_noul_q("q"), model = "m", cache = cf)
+             }
+             before <- md5of(cf)
+             e <- tryCatch({
+               if (mode == "direct") jev_eval("s", list(q = jev_noul_q("q")), model = keyed)
+               else jev_score_many("s", jev_noul_q("q"), model = keyed,
+                                   cache = if (mode == "resume") cf else NULL)
+               NA_character_
+             }, error = function(x) conditionMessage(x))
+             ok_modes <- ok_modes && !is.na(e) && !grepl(KEY, e, fixed = TRUE) &&
+               grepl("REDACTED-API-KEY", e, fixed = TRUE) &&
+               identical(before, md5of(cf))
+           }
+           b1 <- ok_modes
+           # n1: a criterion NAMED with the key, bad used level: the slot
+           # path in the scan error must carry the marker, not the key.
+           qn <- jev_score_q("q", list("low", "high"))
+           qn$criteria <- list(structure(1L, levels = bstr, class = "factor"))
+           names(qn$criteria) <- KEY
+           e <- tryCatch(Rjif:::.question_identity(qn),
+                         error = function(x) conditionMessage(x))
+           n1res <- nzchar(e) && !grepl(KEY, e, fixed = TRUE)
+           Sys.unsetenv("TYPESAFE_API_KEY")
+         })
+         b1 && b2 && m1 && m2 && n1res
+       }))
+
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
   quit(save = "no", status = 1L)

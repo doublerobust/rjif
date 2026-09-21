@@ -882,9 +882,14 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
   # attributes (names, metadata) DO survive to here and must keep
   # working, so the gate is exactly: class must be plain "character".
   if (!identical(class(model), "character")) {
-    stop("Rjif: model must be a plain character scalar (class ",
-         paste(class(model), collapse = "/"), " changes or breaks the ",
-         "wire shape of the model name).", call. = FALSE)
+    # The class names are CALLER text (an attacker can name a class after
+    # the API key -- Astra round 6g R6g-B1 showed this gate echoed the key
+    # verbatim, before .clean_error_text ever saw the message). Scrub the
+    # interpolated text; keep the readable class list for honest users.
+    stop(.clean_error_text(paste0(
+           "Rjif: model must be a plain character scalar (class ",
+           paste(class(model), collapse = "/"), " changes or breaks the ",
+           "wire shape of the model name).")), call. = FALSE)
   }
   # Encoding check BEFORE the blank check: grepl() on an invalid-byte
   # string warns ("input string 1 is invalid") while trying to translate,
@@ -905,6 +910,34 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
                questions = lapply(questions, function(q) unclass(q)))
 
   transport <- getOption("Rjif.transport")
+  # Pre-transport serialization check (audit r6g R6g-B2: the serializer
+  # lives inside .transport_httr, so with a custom Rjif.transport callback
+  # jev_eval handed a NEVER-serializable body -- unknown S3 class, bytes-
+  # marked text -- straight to the callback, and a callback that answers
+  # it returned a "success" no wire could ever have produced; the spec's
+  # 48-check direct matrix all entered the mock first). Render the actual
+  # request envelope with the SAME JSON_OPTS the real transport uses,
+  # HERE, before either branch: the property "a request that could not be
+  # serialized never produces an answer" then holds for every transport,
+  # not just the default one. The error text passes .clean_error_text so
+  # an asJSON failure naming a class that carries the API key stays
+  # redacted (same invariant as R6g-B1). Cost: one extra render per call
+  # (microseconds against a network round trip).
+  # Slot-aware scan FIRST (same helper the cache identity uses), so bytes/
+  # invalid text names its slot ("Rjif: question$instructions ...") instead
+  # of surfacing as jsonlite's generic "translating strings ..." error; the
+  # render below is the second line of defense for what a text scan cannot
+  # see (unknown S3 classes).
+  for (q in body$questions) .wire_slot_scan(q, "question")
+  invisible(tryCatch({
+      as.character(do.call(jsonlite::toJSON, c(list(body), JSON_OPTS)))
+    },
+    error = function(e) {
+      stop(.clean_error_text(paste0(
+        "Rjif: the request could not be serialized (the model or question ",
+        "holds a representation the API cannot receive): ",
+        conditionMessage(e))), call. = FALSE)
+    }))
   # A transport exception or warning must never carry the request (with its
   # Bearer header) into a condition message (audit R2-B2): scrub before
   # rethrowing. Errors are caught and re-thrown scrubbed; warnings run

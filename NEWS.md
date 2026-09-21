@@ -153,6 +153,52 @@ promises the 0.0.1 docs already made.
   across an LC_CTYPE change that reinterprets it into different words;
   same-text resume still costs zero calls.
 
+### Fixed (external audit rounds 6f and 6g, identity rebuilt on the wire)
+
+- Round 6f (blockers R6f-B1/B2, minor R6f-n1): the cache identity is now
+  the MD5 of the request envelope as `jsonlite::toJSON` renders it with
+  the transport's own options (`JSON_OPTS`, single-sourced), not a
+  hand-canonicalized R object. Three hand recipes in a row (6c/6d/6e)
+  lagged the serializer one dispatch axis at a time -- S3 class effects
+  (`I()` suppresses `auto_unbox`; unknown classes fail outright) and
+  factor levels (the wire carries the LABEL text) all let a question or
+  model that the real API could never answer resume a valid row's cached
+  decision with zero calls. The `model` gate additionally rejects
+  non-plain classes (`I("m")`, `matrix("m",1,1)`, classed scalars) up
+  front, and the digest now tracks what the serializer emits so a future
+  gate loosening cannot re-open the aliasing.
+- Round 6g R6g-B1 (blocker, new in the 6f gate): the class-name gate
+  interpolated `class(model)` -- caller text -- straight into its `stop()`
+  before any scrubbing ran, so naming a class after the live API key made
+  the key appear byte-for-byte in the error on all three entry modes.
+  Gate messages now pass through `.clean_error_text`, which redacts the
+  actual key wherever it appears.
+- Round 6g R6g-B2 (major, inherited): the pre-transport serialization
+  property held only against the DEFAULT transport -- with a custom
+  `Rjif.transport` callback, `jev_eval()` handed the callback a
+  never-serializable body and returned its answer as a success. The body
+  is now slot-scanned and rendered with `JSON_OPTS` inside `jev_eval()`
+  itself, before either transport branch, so a request that could never
+  exist on the wire can never produce an answer through any transport.
+  The refusal names the offending slot (`Rjif: question$instructions`)
+  exactly like the batch path.
+- Round 6g R6g-m1 (minor): the factor-level check validated every level,
+  but the serializer emits only the label the value USES; an unused
+  bytes-marked level over-refused a question whose wire bytes are
+  identical to a clean one. The check now looks at the used level only
+  (a used bad level still refuses, with the slot named).
+- Round 6g R6g-m2 (minor): a `POSIXlt` value inside a question sent the
+  identity walk into unbounded recursion (`[[.POSIXlt` re-yields the
+  object), raising an UNcatchable C stack overflow. The walk descends
+  plain lists only; a classed object's wire form is whatever its own
+  `asJSON` renders, which the digest sees and the serializer wrap
+  refuses if rendering fails.
+- Round 6g R6g-n1 (note): criterion names become slot paths in scan
+  errors; the slot text is scrubbed through `.clean_error_text` before
+  interpolation, so a criterion named after the API key surfaces as
+  `[REDACTED-API-KEY]` (the key already travels inside the request -- the
+  invariant is that no ERROR TEXT can carry it out unredacted).
+
 ### Changed
 
 - `selection_curve()` gains `policy = "positive" | "two_sided"` (default
