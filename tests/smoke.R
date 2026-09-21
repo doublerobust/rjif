@@ -1595,10 +1595,10 @@ expect("r3-1: an old-version cache identity is never trusted (forged on-disk; po
          # that passed vacuously even on old code). The frame KEEPS the
          # current column shape, so the refusal can only come from the
          # version tag inside the identity -- the exact isolation test.
-         # (Version numbers advance with each audit round; forge 6L -> 3L.)
+         # (Version numbers advance with each audit round; forge 7L -> 3L.)
          disk <- readRDS(cf)
          fp <- unserialize(attr(disk, "cache_fingerprint"))
-         stopifnot(identical(fp$version, 6L))
+         stopifnot(identical(fp$version, 7L))
          cur_version <- fp$version
          fp$version <- 3L
          old <- disk; attr(old, "cache_fingerprint") <- serialize(fp, NULL, version = 2)
@@ -2002,21 +2002,117 @@ expect("r6d-B1 model identity: same BYTES with different declared encodings are 
 
 expect("r6d-m1 pair decode: no-names and all-NA-names round-trip distinctly",
        local({
-         # R6d-m1: a bare pair array with null names cannot distinguish
-         # "vector had no names attribute" from "all-NA names". The column
-         # carries "named": false only for the first; the decoder must
-         # restore NULL names (matching jprobs of a retained unnamed
-         # answer) versus explicit NA names.
-         a_raw <- structure(list(probs = c(0.2, 0.8)), class = "jev_answer")
-         col_unnamed <- "{\"p\":[[null,0.20000000000000001],[null,0.80000000000000004]],\"named\":false}"
-         col_nanames <- "{\"p\":[[null,0.20000000000000001],[null,0.80000000000000004]]}"
-         pa <- jprobs(a_raw)
-         pu <- jprobs(col_unnamed)
-         pn <- jprobs(col_nanames)
-         is.null(names(pa)) && identical(pa, pu) &&
-           identical(names(pn), c(NA_character_, NA_character_)) &&
-           !identical(pu, pn) && identical(unname(pu), unname(pn)) &&
-           identical(unname(pu), c(0.2, 0.8))
+         # R6d-m1 / R6e-m1: a pair array with missing names must carry ONE
+         # honest syntax end to end. Round 6d's version of this test FAILED
+         # to catch the real defect because it hand-wrote a null-name column
+         # instead of calling the writer -- the writer was emitting {} (R
+         # NULL under jsonlite's default null policy), which fell through
+         # the pair decoder into the legacy object path and surfaced the
+         # "named" flag as a third probability entry. Lesson pinned here:
+         # exercise .probs_column_json, never a lookalike fixture.
+         ap_raw <- c(0.2, 0.8)
+         ap_na <- stats::setNames(c(0.2, 0.8), c(NA_character_, NA_character_))
+         col_raw <- Rjif:::.probs_column_json(ap_raw)
+         col_na <- Rjif:::.probs_column_json(ap_na)
+         a_raw <- structure(list(probs = ap_raw), class = "jev_answer")
+         a_na <- structure(list(probs = ap_na), class = "jev_answer")
+         j_raw <- jprobs(col_raw); j_na <- jprobs(col_na)
+         # writer emits JSON null names for BOTH shapes (one syntax) and
+         # the named:false flag only for the truly unnamed one
+         syntax_ok <- grepl("[[null,0.20000000000000001]", col_raw, fixed = TRUE) &&
+           grepl('"named":false', col_raw, fixed = TRUE) &&
+           !grepl('"named"', col_na, fixed = TRUE) &&
+           !grepl("{}", col_raw, fixed = TRUE)
+         # decoder restores the two shapes distinctly AND identically to
+         # the answer side
+         agree <- identical(j_raw, jprobs(a_raw)) && identical(j_na, jprobs(a_na)) &&
+           is.null(names(j_raw)) &&
+           identical(names(j_na), c(NA_character_, NA_character_)) &&
+           !identical(j_raw, j_na) && identical(unname(j_raw), c(0.2, 0.8))
+         syntax_ok && agree
+       }))
+
+expect("r6e-B1 bytes-marked model is rejected before any cache lookup or call",
+       local({
+         # R6e-B1: enc2utf8() preserves an Encoding=="bytes" flag without
+         # converting, so charToRaw digested a bytes-marked model
+         # identically to the UTF-8-marked copy of the same bytes -- yet
+         # jsonlite REFUSES to serialize bytes-marked strings, so such a
+         # model can never go on the wire. It must not obtain a cached
+         # decision either (fail closed, like the state path).
+         x <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(x) <- "UTF-8"
+         y <- x; Encoding(y) <- "bytes"
+         seen <- 0L
+         tr <- function(body) { seen <<- seen + 1L
+           jsonlite::toJSON(body, auto_unbox = TRUE, null = "null")
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         q <- jev_noul_q("s")
+         cf <- tempfile(fileext = ".rds")
+         a <- withr_options(Rjif.transport = tr,
+                            jev_score_many("s", q, model = x, cache = cf))
+         before <- tools::md5sum(cf)
+         refused <- FALSE
+         msg <- tryCatch({ withr_options(Rjif.transport = tr,
+                             jev_score_many("s", q, model = y, cache = cf))
+                           "" },
+                         error = function(e) { refused <<- TRUE
+                           conditionMessage(e) })
+         after <- tools::md5sum(cf)
+         # also refused WITHOUT a cache, before any transport call
+         refused_nocache <- FALSE
+         tryCatch(withr_options(Rjif.transport = tr,
+                    jev_score_many("s", q, model = y)),
+                  error = function(e) refused_nocache <<- TRUE)
+         refused && refused_nocache && identical(before, after) &&
+           grepl("bytes", msg, fixed = TRUE) && seen == 1L &&
+           isTRUE(a$p[[1L]] == 0.9)
+       }))
+
+expect("r6e-m2 question identity is encoding-canonicalized, locale change refuses",
+       local({
+         # R6e-m2 (inherited v4): serialize(unclass(q)) stores native-flagged
+         # strings as locale-blind BYTES, so the same question filled in one
+         # LC_CTYPE could resume its cache in another even though jsonlite
+         # would now post different words. .question_identity stores
+         # enc2utf8 text, so declared-encoding differences on the question
+         # now produce DIFFERENT fingerprints (refusing), while same-input
+         # resume stays stable.
+         s_latin <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(s_latin) <- "latin1"
+         s_utf8 <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(s_utf8) <- "UTF-8"
+         qi <- Rjif:::.question_identity
+         differs <- !identical(qi(jev_noul_q(s_latin)), qi(jev_noul_q(s_utf8)))
+         # the jsonlite wire agrees with the fingerprint on WHICH questions
+         # are distinct: the two declared encodings post different bodies
+         wire <- function(q) as.character(jsonlite::toJSON(list(q = unclass(q)),
+                                                           auto_unbox = TRUE))
+         wire_differs <- !identical(wire(jev_noul_q(s_latin)),
+                                    wire(jev_noul_q(s_utf8)))
+         stable <- identical(qi(jev_noul_q(s_latin)), qi(jev_noul_q(s_latin)))
+         # criteria NAMES are normalized too (they are caller text)
+         b <- rawToChar(as.raw(c(0xc3, 0xa9)))
+         c1 <- qi(jev_choice_q("x", stats::setNames(list("d1", "d2"), c(b, "z"))))
+         names_ok <- identical(Encoding(names(c1$criteria)[[1L]]), "UTF-8")
+         # end-to-end: two flags of the same BYTES on a NON-ASCII question
+         # must not share a cache even when redaction collapses the readable
+         # model entry -- the question entry itself now distinguishes them
+         seen <- 0L
+         tr <- function(body) { seen <<- seen + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = if (seen == 1L) 0.9 else 0.1))) }
+         cf <- tempfile(fileext = ".rds")
+         old_key <- Sys.getenv("TYPESAFE_API_KEY", unset = NA_character_)
+         on.exit(if (is.na(old_key)) Sys.unsetenv("TYPESAFE_API_KEY")
+                 else Sys.setenv(TYPESAFE_API_KEY = old_key), add = TRUE)
+         Sys.setenv(TYPESAFE_API_KEY = "Bearer fixture-key")
+         qa <- jev_noul_q(s_latin); qb <- jev_noul_q(s_utf8)
+         a1 <- withr_options(Rjif.transport = tr, jev_score_many("s", qa, cache = cf))
+         refused <- FALSE
+         tryCatch(withr_options(Rjif.transport = tr,
+                    jev_score_many("s", qb, cache = cf)),
+                  error = function(e) refused <<- TRUE)
+         differs && wire_differs && stable && names_ok && refused &&
+           seen == 1L
        }))
 
 cat("\n")

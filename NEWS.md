@@ -21,13 +21,18 @@ promises the 0.0.1 docs already made.
   the `$q` extraction previously dropped with the envelope. Motivation: a
   cached run interrupted across a model-alias change can now distinguish
   day-one rows from day-two rows; before, nothing in the output revealed it.
-- Cache fingerprint version 6L (old caches are refused as before; the
+- Cache fingerprint version 7L (old caches are refused as before; the
   version tag carries the reason for anyone inspecting the serialized
   cache, while the user-facing error stays the generic "stale cache"
-  message). v6 adds the `model_id` whole-content digest that makes the
-  resume identity independent of the display-scrubbed model string
-  (r6c R6c-B1); v5 had the per-row provenance columns; 5L-era caches
-  predate the whole pre-release feature and are refused as stale.
+  message). v7 canonicalizes the model and question text for the
+  fingerprint the same way the JSON transport does (r6e: a `model` string
+  marked `Encoding == "bytes"` can never be serialized and is now rejected
+  before any cache lookup or call, and question text that a locale change
+  would reinterpret no longer resumes its old cache). v6 added the
+  `model_id` whole-content digest that makes the resume identity
+  independent of the display-scrubbed model string (r6c R6c-B1); v5 had
+  the per-row provenance columns; caches from those eras predate the whole
+  pre-release feature and are refused as stale.
 
 ### Breaking
 
@@ -61,7 +66,7 @@ promises the 0.0.1 docs already made.
 - `DESCRIPTION` gains `openssl (>= 0.8)` in Imports. It is already an
   unconditional dependency of `httr`, so no new software is installed by this.
 
-### Fixed (external audits of the provenance feature, rounds 6, 6b and 6c)
+### Fixed (external audits of the provenance feature, rounds 6 through 6e)
 
 - Provenance strings (`model_requested`, `model_returned`, the batch
   `model` column) are scrubbed AND stripped of all attributes before
@@ -110,7 +115,27 @@ promises the 0.0.1 docs already made.
   names so `jprobs()` agrees with the retained answer on both raw shapes
   (r6d R6d-m1; the validator always labels positional distributions, so
   this edge was reachable only through raw retained answers, not through
-  an ordinary vendor Choice response).
+  an ordinary vendor Choice response). R6e R6e-m1 caught that the r6d
+  writer emitted an R NULL name as `{}` (jsonlite's default null policy,
+  which `na = "null"` does not cover) while the decoder accepted only
+  JSON null, so the real bytes fell through into the legacy object path;
+  the writer now pins `null = "null"` so every missing name serializes
+  one way, and the regression test exercises the writer function
+  directly rather than a hand-written column.
+- A `model` string marked `Encoding == "bytes"` -- which the JSON
+  transport can never serialize -- is now rejected up front, before any
+  cache lookup or transport call, leaving the cache file byte-intact
+  (r6e R6e-B1; the state path already refused the same shape).
+  enc2utf8() preserves the `bytes` flag without converting it, so the
+  r6d model digest could not tell a bytes-marked model apart from the
+  UTF-8-marked copy of its bytes, and a redaction-collapsed resume handed
+  the impossible model a cached success.
+- Question text stored in the cache fingerprint is now canonicalized with
+  enc2utf8() like the model and the states (r6e, an inherited v4 path
+  reproduced on the originally-approved commit as well). A question whose
+  bytes R treats as locale-dependent no longer resumes its own cache
+  across an LC_CTYPE change that reinterprets it into different words;
+  same-text resume still costs zero calls.
 
 ### Changed
 

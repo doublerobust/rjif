@@ -263,6 +263,26 @@ jev_score_many <- function(state_vec, question, ...,
          call. = FALSE)
   }
   state_vec <- enc2utf8(state_vec)
+  # Model encoding (audit r6e R6e-B1): the SAME rule must hold for the
+  # model string. enc2utf8() preserves an Encoding == "bytes" flag without
+  # converting, and charToRaw then digests it identically to the
+  # UTF-8-marked copy of the same bytes -- but jsonlite REFUSES to
+  # serialize bytes-marked strings, so such a model can never go on the
+  # wire. Without this check it could still obtain a cached successful
+  # decision via a redaction-collapsed resume (fixture: model y marked
+  # "bytes" resumed model x's 0.9 with zero calls, while a fresh y errored
+  # 'translating strings with "bytes" encoding is not allowed'). Rejecting
+  # up front fails closed like the state path; same-model resume for
+  # supported encodings is unaffected.
+  model_bare <- as.character(unname(model))
+  if (any(vapply(model_bare, function(s) {
+        !is.na(s) && (Encoding(s) == "bytes" || !validEnc(s))
+      }, logical(1)))) {
+    stop("Rjif: model is 'bytes'-marked or contains invalid byte ",
+         "sequences and can never be serialized into a request; re-encode ",
+         "it (e.g. stringi::str_conv or iconv) before scoring.",
+         call. = FALSE)
+  }
   n <- length(state_vec)
   batch <- suppressWarnings(as.integer(batch))
   if (length(batch) != 1L || is.na(batch) || batch < 1L) batch <- 16L
@@ -280,22 +300,35 @@ jev_score_many <- function(state_vec, question, ...,
   # evaluated_at, row_source, score_value, probs) -- round 3 carryover 1.
   # An old v4 cache would ALSO fail the frame-shape check, but the version
   # tag makes the reason explicit in the refusal.
-  # Model identity (audit r6b R6b-B1 / r6c R6c-B1 -- read both before
-  # "fixing" this again): storing the raw `model` ARGUMENT smuggled
-  # attribute payloads into the saved cache (r6b); storing the SCRUBBED
-  # string merged two distinct aliases whenever display redaction rewrote
-  # both into one marker, letting a second alias resume the first alias's
-  # decisions with zero calls (r6c). The answer is neither: the resume
-  # identity is an MD5 digest of the model as it goes on the wire
-  # (charToRaw of the same value jev_eval puts in the request body;
-  # attributes are part of neither -- .state_digest discards them like any
-  # other function, so the smuggled-attribute payload can never even seed
-  # the digest), and the readable entry is the
-  # scrubbed bare string, display-only and explicitly NOT authoritative.
-  # Version 6L: the fingerprint gains the model_id digest entry (r6c
-  # R6c-B1); 5L-era caches predate the whole pre-release feature, so they
-  # are refused as stale.
-  cache_fingerprint <- serialize(list(version = 6L, question = unclass(q),
+  # Model identity (audits r6b R6b-B1 / r6c R6c-B1 / r6e R6e-B1 -- read ALL
+  # THREE before "fixing" this again): storing the raw `model` ARGUMENT
+  # smuggled attribute payloads into the saved cache (r6b); storing the
+  # SCRUBBED string merged two distinct aliases whenever display redaction
+  # rewrote both into one marker, letting a second alias resume the first
+  # alias's decisions with zero calls (r6c); hashing raw bytes missed that
+  # a string whose Encoding is "bytes" can never be serialized by the
+  # transport yet shared a digest with the UTF-8-marked copy of its bytes
+  # (r6e). The answer: bytes-marked and invalid-byte models are REJECTED up
+  # front (before any cache lookup or write, like states are), and the
+  # resume identity is .model_identity -- the whole-content digest of the
+  # model after the SAME declared-encoding -> UTF-8 conversion the JSON
+  # serializer performs, taken on the explicitly coerced bare string
+  # (as.character(unname(.)) is the coercion that drops attributes;
+  # argument passing itself RETAINS them -- auditor's identity-function
+  # control, r6d). The readable entry is the scrubbed bare string,
+  # display-only and explicitly NOT authoritative.
+  # Question identity (audit r6e, inherited v4 path, reported alongside):
+  # serialize(unclass(q)) stores native-encoded strings as locale-blind
+  # BYTES, so a question text that jsonlite would post as different words
+  # under two LC_CTYPE settings could resume its own cache unchanged across
+  # the locale change. .question_identity normalizes every character
+  # element with enc2utf8 BEFORE storing, so the fingerprint sees the same
+  # text the wire sends and a locale change between fill and resume now
+  # refuses.
+  # Version 6L: model_id digest entry (r6c R6c-B1). Version 7L: the digest
+  # input is the transport-canonicalized model/question (r6e); 5L/6L-era
+  # caches predate the whole pre-release feature and are refused as stale.
+  cache_fingerprint <- serialize(list(version = 7L, question = .question_identity(q),
     model = .bare_char(model), model_id = .model_identity(model),
     n = n, threshold = threshold, floor = confidence_floor,
     states = .state_digest(state_vec)),
@@ -422,50 +455,7 @@ jev_score_many <- function(state_vec, question, ...,
       if (q$type == "score") score_val[j] <- v
       ap <- ans[["probs"]]
       if (q$type != "noul" && !is.null(ap) && length(ap)) {
-        # ap is the validator's NORMALIZED distribution (probs, post /sum).
-        # digits = 17: every double round-trips exactly through 17
-        # significant decimal digits (a fixed property of binary64 for
-        # positive values; -0 keeps its VALUE -- a valid probability cannot
-        # be below 0, and the sign of a zero never enters a decision), so
-        # jprobs() reproduces the validator's numbers rather than adding a
-        # second, independently rounded copy. This is NOT the shortest
-        # representation -- jsonlite's digits = NA caps at 15 significant
-        # digits and loses bits (audit r6 R6-B2 caught the old claim).
-        # Longer text is the right trade for a provenance column: it must
-        # be byte-stable AND bit-exact.
-        # Storage shape (audit r6b R6b-B2 / r6c R6c-B2 -- the third attempt
-        # at a collision policy, read both findings before changing it):
-        # display redaction can legitimately MERGE two distinct option
-        # labels into one name, and any suffix-renaming scheme can be
-        # defeated by adversarial labels (make.unique itself output a
-        # duplicate when a ".1"-suffixed label already existed, and jsonlite
-        # then re-suffixed the column side differently from the answer
-        # side). Objects cannot represent duplicate keys honestly. So the
-        # column is NOT a name-keyed object: it is {"p": [[name, value],
-        # ...]} -- an array of pairs under a fixed key (a BARE pair array
-        # would be ambiguous for a one-entry distribution like {"a":1},
-        # which decodes as a pair too). Names are stored byte-exactly,
-        # duplicates and all; jprobs() decodes the same pairs. Both
-        # representations of one distribution are now identical by
-        # construction, for any labels. After a redaction merge the names
-        # are ambiguous BY NATURE; no probability may be looked up by a
-        # merged name -- frame$p holds the selected value, bound before
-        # redaction, and is authoritative.
-        apn <- names(ap)
-        dist <- list(p = lapply(seq_along(ap), function(i)
-          list(apn[[i]], ap[[i]])))
-        # R6d-m1: a JSON pair array cannot distinguish "vector had NO names
-        # attribute" from "vector had all-NA names" -- both look like null
-        # entries. An unnamed answer decoded from the column as all-NA names
-        # broke accessor agreement (jprobs(answer) unnamed, jprobs(column)
-        # NA-named -> identical() FALSE, and the two inputs merged to one
-        # storage form). The flag is emitted ONLY for the unnamed case (the
-        # rare raw path -- the validator gives positional distributions the
-        # question labels), so the ordinary named envelope bytes are
-        # unchanged.
-        if (is.null(apn)) dist$named <- FALSE
-        probs_json[j] <- as.character(jsonlite::toJSON(
-          dist, digits = 17, auto_unbox = TRUE, na = "null"))
+        probs_json[j] <- .probs_column_json(ap)
       }
       # identical policy to jif() via .decide_answer() (audit finding 3):
       # two-sided noul window when floor > threshold, single-sided otherwise.
@@ -580,6 +570,89 @@ jev_score_many <- function(state_vec, question, ...,
 # explicitly NOT authoritative.
 .model_identity <- function(model) {
   .state_digest(enc2utf8(as.character(unname(model))))
+}
+
+# Fingerprint copy of the question (audit r6e, inherited v4 path): the
+# wire sends question text through jsonlite, which converts every
+# character element from its DECLARED encoding to UTF-8 -- an
+# "unknown"/native-marked string is therefore locale-dependent text. The
+# old fingerprint stored unclass(q) verbatim; R's serializer keeps the
+# bytes and the locale-blind flag, so the SAME question filled in one
+# LC_CTYPE could resume its cache in another locale even though fresh
+# serialization now denotes different words (auditor's cross-locale
+# control: silently resumed 0.9 where a fresh call returned 0.1). Storing
+# enc2utf8-normalized text makes the fingerprint see the words the
+# transport sends: a locale change that reinterprets a native-marked
+# string now mismatches and refuses; same-text resume costs zero calls.
+# Names (option keys, criteria keys) are caller text too and are
+# normalized identically. Not applied to the answer objects or the wire
+# body -- only to the fingerprint copy.
+.question_identity <- function(q) {
+  canon_chr <- function(x) {
+    nx <- names(x)
+    x <- enc2utf8(unname(x))
+    # setNames would strip the "UTF-8" flags it just set (it copies the
+    # input's attributes), so rebuild the vector and pin names directly.
+    if (!is.null(nx)) `names<-`(x, canon_chr(nx)) else x
+  }
+  rec <- function(x) {
+    if (is.list(x)) {
+      nx <- names(x)
+      x <- lapply(x, rec)
+      if (!is.null(nx)) names(x) <- canon_chr(nx)
+      return(x)
+    }
+    if (is.character(x)) return(canon_chr(x))
+    x
+  }
+  rec(unclass(q))
+}
+
+# The probs_json column's storage envelope (audits r6b R6b-B2, r6c R6c-B2,
+# r6d R6d-m1, r6e R6e-m1 -- read ALL FOUR before changing it; each prior
+# attempt had its own defeat mode):
+# * ap is the validator's NORMALIZED distribution (probs, post /sum).
+# * digits = 17: every double round-trips exactly through 17 significant
+#   decimal digits (a fixed property of binary64 for positive values; -0
+#   keeps its VALUE -- a valid probability cannot be below 0, and the sign
+#   of a zero never enters a decision), so jprobs() reproduces the
+#   validator's numbers rather than adding a second, independently rounded
+#   copy. This is NOT the shortest representation -- jsonlite's digits = NA
+#   caps at 15 significant digits and loses bits (audit r6 R6-B2 caught the
+#   old claim). Longer text is the right trade for a provenance column: it
+#   must be byte-stable AND bit-exact.
+# * display redaction can legitimately MERGE two distinct option labels
+#   into one name, and any suffix-renaming scheme can be defeated by
+#   adversarial labels (r6c: make.unique itself output a duplicate when a
+#   ".1"-suffixed label already existed, and jsonlite then re-suffixed the
+#   column side differently from the answer side). A JSON object cannot
+#   honestly carry duplicate keys. So the column is NOT a name-keyed
+#   object: it is {"p": [[name, value], ...]} -- pairs under a fixed key
+#   (a BARE pair array would be ambiguous for a one-entry distribution
+#   like {"a":1}, which decodes as a pair too). Names are stored
+#   byte-exactly, duplicates and all; jprobs() decodes the same pairs. The
+#   two representations of one distribution are identical by construction
+#   for ANY labels. After a redaction merge the names are ambiguous BY
+#   NATURE; no probability may be looked up by a merged name -- frame$p
+#   holds the selected value, bound before redaction, and is authoritative.
+# * a pair array cannot distinguish "vector had NO names attribute" from
+#   "all-NA names" -- r6d added the "named": false flag for the first
+#   shape. R6e R6e-m1 caught that the writer emitted R NULL (serialized as
+#   {} by jsonlite's default null policy, which na = "null" does not
+#   cover) while jprobs() only accepted JSON null, so the real writer's
+#   unnamed bytes fell through the pair decoder into the legacy object
+#   path and picked up named=0 as a third entry -- and the round-6d smoke
+#   test passed because it hand-wrote null instead of calling this
+#   function. Lesson pinned by test: exercise THIS writer, never a
+#   lookalike fixture. null = "null" makes every missing name (NULL or
+#   NA) serialize as JSON null consistently.
+.probs_column_json <- function(ap) {
+  apn <- names(ap)
+  dist <- list(p = lapply(seq_along(ap), function(i)
+    list(apn[[i]], ap[[i]])))
+  if (is.null(apn)) dist$named <- FALSE
+  as.character(jsonlite::toJSON(dist, digits = 17, auto_unbox = TRUE,
+                                na = "null", null = "null"))
 }
 
 .cache_valid <- function(df, n, fingerprint) {
