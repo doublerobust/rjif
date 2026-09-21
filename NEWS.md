@@ -76,7 +76,12 @@ promises the 0.0.1 docs already made.
   distinct aliases whenever display redaction rewrote both into one
   marker, letting a second alias silently resume the first alias's
   cached decisions with zero calls (an inherited v4-era retention path
-  surfaced by the new tests, not introduced by this feature).
+  surfaced by the new tests, not introduced by this feature). The
+  digest is taken after the same encoding conversion the transport
+  performs (r6d R6d-B1: two strings sharing bytes but declaring
+  different encodings -- "é" UTF-8 versus the same bytes flagged
+  latin1 -- go on the wire as different JSON and must not share a cache
+  identity).
 - `probs_json` is written with 17 significant digits: jsonlite's
   `digits = NA` caps at 15 and silently lost bits for non-dyadic
   normalized probabilities (r6 R6-B2). Positive doubles re-parses
@@ -99,6 +104,13 @@ promises the 0.0.1 docs already made.
   by construction for any labels, fresh and after resume. Merged names
   remain ambiguous by nature, so selected probabilities stay looked up
   from the pre-redaction binding (`p` column), never by a merged name.
+- The pair encoding now distinguishes a distribution with NO names
+  attribute from one whose names are all NA: only the former carries
+  `"named": false`, and the decoder restores NULL versus explicit NA
+  names so `jprobs()` agrees with the retained answer on both raw shapes
+  (r6d R6d-m1; the validator always labels positional distributions, so
+  this edge was reachable only through raw retained answers, not through
+  an ordinary vendor Choice response).
 
 ### Changed
 

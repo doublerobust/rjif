@@ -1070,11 +1070,15 @@ jprobs <- function(x) {
   if (is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)) {
     parsed <- tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE),
                        error = function(e) NULL)
-    # probs_json shape (see .cache stamping): {"p": [[name, value], ...]}.
-    # A JSON object cannot honestly store duplicate keys, so the
-    # distribution travels as pairs under the fixed key "p"; the fixed key
-    # also keeps a one-entry pair array from being ambiguous with an
-    # object. Decode back to a named vector with the names byte-exact.
+    # probs_json shape (see .cache stamping): {"p": [[name, value], ...]},
+    # plus "named": false ONLY when the source vector had no names attribute
+    # (r6d R6d-m1: null pair-names are otherwise ambiguous between "no
+    # names" and "all-NA names"). A JSON object cannot honestly store
+    # duplicate keys, so the distribution travels as pairs under a fixed
+    # key; the fixed key also keeps a one-entry pair array from being
+    # ambiguous with an object. Decode back to a named vector with the
+    # names byte-exact; unnamed decodes to an UNNAMED vector so the answer
+    # side and the column side agree for every input shape.
     if (is.list(parsed) && !is.null(parsed[["p"]]) && is.list(parsed[["p"]])) {
       prs <- parsed[["p"]]
       shaped <- length(prs) > 0L && all(vapply(prs, function(p)
@@ -1082,11 +1086,12 @@ jprobs <- function(x) {
           (is.null(p[[1L]]) || (is.character(p[[1L]]) && length(p[[1L]]) == 1L)),
         logical(1)))
       if (shaped) {
-        nms <- vapply(prs, function(p) p[[1L]] %||% NA_character_, NA_character_)
         vals <- vapply(prs, function(p) {
           v <- p[[2L]]
           if (is.null(v)) NA_real_ else suppressWarnings(as.double(v[[1L]]))
         }, NA_real_)
+        if (isFALSE(parsed[["named"]])) return(vals)
+        nms <- vapply(prs, function(p) p[[1L]] %||% NA_character_, NA_character_)
         return(stats::setNames(vals, nms))
       }
     }

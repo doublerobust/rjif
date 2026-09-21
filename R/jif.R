@@ -452,11 +452,20 @@ jev_score_many <- function(state_vec, question, ...,
         # merged name -- frame$p holds the selected value, bound before
         # redaction, and is authoritative.
         apn <- names(ap)
-        if (is.null(apn)) apn <- rep(NA_character_, length(ap))
+        dist <- list(p = lapply(seq_along(ap), function(i)
+          list(apn[[i]], ap[[i]])))
+        # R6d-m1: a JSON pair array cannot distinguish "vector had NO names
+        # attribute" from "vector had all-NA names" -- both look like null
+        # entries. An unnamed answer decoded from the column as all-NA names
+        # broke accessor agreement (jprobs(answer) unnamed, jprobs(column)
+        # NA-named -> identical() FALSE, and the two inputs merged to one
+        # storage form). The flag is emitted ONLY for the unnamed case (the
+        # rare raw path -- the validator gives positional distributions the
+        # question labels), so the ordinary named envelope bytes are
+        # unchanged.
+        if (is.null(apn)) dist$named <- FALSE
         probs_json[j] <- as.character(jsonlite::toJSON(
-          list(p = lapply(seq_along(ap), function(i)
-            list(apn[[i]], ap[[i]]))),
-          digits = 17, auto_unbox = TRUE, na = "null"))
+          dist, digits = 17, auto_unbox = TRUE, na = "null"))
       }
       # identical policy to jif() via .decide_answer() (audit finding 3):
       # two-sided noul window when floor > threshold, single-sided otherwise.
@@ -548,19 +557,30 @@ jev_score_many <- function(state_vec, question, ...,
   list(digest = paste(format(d), collapse = ""), n = length(state_vec))
 }
 
-# Cache identity of the model argument (audit r6c R6c-B1). The readable
-# fingerprint entry must be scrubbed for display (r6b R6b-B1: raw
-# attributes smuggled payloads into the saved cache), but the SCRUBBED
-# string must never be the RESUME IDENTITY: display redaction merges
-# distinct aliases ("Bearer option_alpha" and "Bearer option_beta" both
-# become "Bearer [REDACTED]"), which used to let a second alias resume the
-# first alias's decisions with zero calls. Identity is therefore the same
-# whole-content digest used for states (charToRaw of the model value
-# exactly as jev_eval puts it in the request body; function argument
-# passing discards attributes, so a smuggled attribute payload can never
-# even seed the digest), and the readable entry stays the scrubbed bare
-# string, display-only and explicitly NOT authoritative.
-.model_identity <- function(model) .state_digest(as.character(unname(model)))
+# Cache identity of the model argument (audit r6c R6c-B1, residual r6d
+# R6d-B1). The readable fingerprint entry must be scrubbed for display
+# (r6b R6b-B1: raw attributes smuggled payloads into the saved cache),
+# but the SCRUBBED string must never be the RESUME IDENTITY: display
+# redaction merges distinct aliases ("Bearer option_alpha" and "Bearer
+# option_beta" both become "Bearer [REDACTED]"), which used to let a
+# second alias resume the first alias's decisions with zero calls.
+# Identity is therefore the same whole-content digest used for states,
+# computed on the model EXACTLY AS IT GOES ON THE WIRE (r6d R6d-B1):
+# jsonlite serializes character values by converting from their DECLARED
+# encoding to UTF-8, so two strings sharing bytes c3 a9 -- one flagged
+# UTF-8 ("e-acute"), one flagged latin1 ("A-tilde e-acute") -- post
+# DIFFERENT wire bodies (c3 a9 vs c3 83 c2 a9) and are different models,
+# yet charToRaw of the raw argument digested them identically. enc2utf8()
+# here reproduces that transport conversion on both sides, so the digest
+# matches what the vendor is actually asked to score. Function argument
+# evaluation does NOT drop attributes (auditor's control: an identity
+# function retains them), so the explicit as.character(unname(.))
+# coercion is what keeps an attributes-carrying model out of the digest;
+# the readable entry stays the scrubbed bare string, display-only and
+# explicitly NOT authoritative.
+.model_identity <- function(model) {
+  .state_digest(enc2utf8(as.character(unname(model))))
+}
 
 .cache_valid <- function(df, n, fingerprint) {
   cols <- c("decision", "option", "p", "confidence", "abstained", "error",

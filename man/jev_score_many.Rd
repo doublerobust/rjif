@@ -124,7 +124,10 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
  \code{\{"p": [[name, value], ...]\}} pair encoding keeps the column and
  the retained answer's \code{\link{jprobs}} identical for ANY labels (a
  JSON object cannot honestly carry duplicate keys, and every renaming
- scheme tried was defeated by adversarial labels -- audit r6b/r6c). After
+ scheme tried was defeated by adversarial labels -- audit r6b/r6c). An
+ \emph{unnamed} distribution additionally carries \code{"named": false}
+ so the decoder does not confuse "no names attribute" with "all-NA
+ names" (audit r6d). After
  a merged name, look probabilities up positionally; the frame's \code{p}
  is bound before redaction and is the authoritative selected value.
   Together they distinguish rows judged before and after a model alias

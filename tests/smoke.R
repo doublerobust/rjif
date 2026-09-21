@@ -1953,6 +1953,72 @@ expect("r6c-B1 model identity: two redaction-merged aliases never share a cache"
          identical(d1$model[[1L]], "m") && refused && clean
        }))
 
+expect("r6d-B1 model identity: same BYTES with different declared encodings are different models",
+       local({
+         # R6d-B1: charToRaw digests a UTF-8-flagged and a latin1-flagged
+         # copy of bytes c3 a9 identically, but jsonlite serialises them to
+         # DIFFERENT wire bodies (c3 a9 vs c3 83 c2 a9) -- they are distinct
+         # models. The identity digest must match the transport conversion
+         # (enc2utf8), not the raw bytes, or redaction collapsing the
+         # readable entry lets alias y silently resume alias x's cache.
+         x <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(x) <- "UTF-8"
+         y <- x; Encoding(y) <- "latin1"
+         wire <- function(m) as.character(jsonlite::toJSON(list(model = m),
+                                                           auto_unbox = TRUE))
+         seen <- 0L
+         tr <- function(body) { seen <<- seen + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul",
+                  noul = if (identical(wire(body$model), wire(x))) 0.9 else 0.1))) }
+         q <- jev_noul_q("s")
+         cf <- tempfile(fileext = ".rds")
+         old_key <- Sys.getenv("TYPESAFE_API_KEY", unset = NA_character_)
+         on.exit(if (is.na(old_key)) Sys.unsetenv("TYPESAFE_API_KEY")
+                 else Sys.setenv(TYPESAFE_API_KEY = old_key), add = TRUE)
+         Sys.setenv(TYPESAFE_API_KEY = x)
+         a <- withr_options(Rjif.transport = tr,
+                            jev_score_many("s", q, model = x, cache = cf))
+         Sys.setenv(TYPESAFE_API_KEY = y)
+         refused <- FALSE
+         r <- tryCatch(withr_options(Rjif.transport = tr,
+                         jev_score_many("s", q, model = y, cache = cf)),
+                       error = function(e) { refused <<- TRUE; NULL })
+         # y's own fresh run must return the fresh decision
+         fresh <- withr_options(Rjif.transport = tr,
+                                jev_score_many("s", q, model = y))
+         # x must STILL resume its own cache (zero new calls after x's fill)
+         Sys.setenv(TYPESAFE_API_KEY = x)
+         a2 <- withr_options(Rjif.transport = tr,
+                  jev_score_many("s", q, model = x, cache = cf))
+         digests_differ <- !identical(Rjif:::.model_identity(x)$digest,
+                                      Rjif:::.model_identity(y)$digest)
+         fp <- unserialize(attr(readRDS(cf), "cache_fingerprint"))
+         readable <- identical(fp$model, "[REDACTED-API-KEY]") &&
+           is.null(attributes(fp$model))
+         refused && isTRUE(fresh$p[[1L]] == 0.1) &&
+           isTRUE(attr(a2, "n_resumed") == 1L) && isTRUE(a2$p[[1L]] == 0.9) &&
+           digests_differ && readable
+       }))
+
+expect("r6d-m1 pair decode: no-names and all-NA-names round-trip distinctly",
+       local({
+         # R6d-m1: a bare pair array with null names cannot distinguish
+         # "vector had no names attribute" from "all-NA names". The column
+         # carries "named": false only for the first; the decoder must
+         # restore NULL names (matching jprobs of a retained unnamed
+         # answer) versus explicit NA names.
+         a_raw <- structure(list(probs = c(0.2, 0.8)), class = "jev_answer")
+         col_unnamed <- "{\"p\":[[null,0.20000000000000001],[null,0.80000000000000004]],\"named\":false}"
+         col_nanames <- "{\"p\":[[null,0.20000000000000001],[null,0.80000000000000004]]}"
+         pa <- jprobs(a_raw)
+         pu <- jprobs(col_unnamed)
+         pn <- jprobs(col_nanames)
+         is.null(names(pa)) && identical(pa, pu) &&
+           identical(names(pn), c(NA_character_, NA_character_)) &&
+           !identical(pu, pn) && identical(unname(pu), unname(pn)) &&
+           identical(unname(pu), c(0.2, 0.8))
+       }))
+
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
