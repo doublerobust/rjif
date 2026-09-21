@@ -103,17 +103,22 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
   floor, rows policy-abstained by \code{confidence_floor} also record their
   reason here, same wording as \code{\link{jif_reason}}), plus per-row
   provenance columns: \code{model} (the resolved model that produced THIS
-  row's answer, as the API reported it; \code{NA} for rows never evaluated),
+  row's answer, exactly as the API reported it: \code{NA} when the response
+  carried no usable model identifier -- the requested alias is never
+  substituted, as that would present unknown provenance as known -- and
+  \code{[REDACTED-API-KEY]} if the vendor echoed the caller's key back in
+  that field, which is a visible marker, not a silent loss),
   \code{evaluated_at} (row's evaluation time, UTC ISO 8601; persisted across
   resumes, so it never silently moves to the re-run's clock),
-  \code{row_source} (\code{"api"}: evaluated by a call in this run;
+  \code{row_source} (\code{"api"}: attempted by a call in this run -- this
+  also covers a row whose call failed or abstained, it was still attempted;
   \code{"cache"}: result reused from \code{cache}; \code{"none"}: no call
   was ever possible, e.g. an NA state), \code{score_value} (the exact
   continuous score as a double for Score batches -- \code{option} is only a
   3-decimal display; \code{NA} elsewhere), and \code{probs_json} (the
-  validator's normalized probability distribution as a
-  shortest-round-trip JSON string, parseable with \code{\link{jprobs}};
-  \code{NA} for Noul and for rows without one).
+  validator's normalized probability distribution as a 17-significant-digit
+  JSON string that re-parses bit-exactly, parseable with
+  \code{\link{jprobs}}; \code{NA} for Noul and for rows without one).
   Together they distinguish rows judged before and after a model alias
   changed underneath an interrupted cached run. Attributes
   \code{n_abstained} and \code{question_type} summarise the run,

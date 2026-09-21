@@ -407,10 +407,14 @@ jev_score_many <- function(state_vec, question, ...,
       ap <- ans[["probs"]]
       if (q$type != "noul" && !is.null(ap) && length(ap)) {
         # ap is the validator's NORMALIZED distribution (probs, post /sum).
-        # digits = NA: shortest round-trip decimal for each double, so
-        # jprobs() reproduces these values bit-for-bit rather than adding a
-        # second, independently rounded copy.
-        probs_json[j] <- jsonlite::toJSON(as.list(ap), digits = NA,
+        # digits = 17: every double round-trips exactly through 17
+        # significant decimal digits (a fixed property of binary64), so
+        # jprobs() reproduces the validator's numbers identically. This is
+        # NOT the shortest representation -- jsonlite's digits = NA caps at
+        # 15 significant digits and loses bits (audit r6 R6-B2 caught the
+        # old claim). Longer text is the right trade for a provenance column:
+        # it must be byte-stable AND bit-exact.
+        probs_json[j] <- jsonlite::toJSON(as.list(ap), digits = 17,
                                           auto_unbox = TRUE, na = "null")
       }
       # identical policy to jif() via .decide_answer() (audit finding 3):

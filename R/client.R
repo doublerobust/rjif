@@ -73,6 +73,35 @@ jev_key <- function() {
   else out
 }
 
+# A returned-model identifier must be ONE non-blank string (audit r6 R6-B3).
+# Missing, NA, empty, whitespace, a multi-element vector, or a non-character
+# scalar are all "the vendor did not tell us" -- never silently filled in with
+# the requested alias, because unknown provenance presented as known defeats
+# the alias-drift check this field exists for.
+.scalar_string <- function(x) {
+  # With fromJSON(simplifyVector = FALSE) a VALID string field is always a
+  # length-1 character vector; anything list-shaped or non-character is
+  # malformed metadata, not a reported model.
+  if (is.null(x) || !is.character(x) || length(x) != 1L) return(NA_character_)
+  if (is.na(x) || !nzchar(trimws(x))) NA_character_ else x
+}
+
+# .bare_char() exists for R6-B1: .scrub_secrets()/.redact_key() sanitize the
+# VALUES of a character vector but carry its attributes along untouched, and
+# the recursive retention scrub (.redact_value) runs BEFORE the provenance
+# attributes are attached in jev_eval. An attributes-carrying `model`
+# argument (`structure("jev-latest", metadata = <secret>)`) therefore used to
+# smuggle arbitrary strings into retained answer objects, serialized results,
+# and saved caches. Every string that leaves jev_eval as provenance goes
+# through here: scrub, then strip ALL attributes so the value is exactly what
+# it looks like and nothing rides along in the margins.
+.bare_char <- function(x) {
+  s <- .scrub_secrets(.redact_key(as.character(x)))
+  if (length(s) != 1L) return(NA_character_)
+  attributes(s) <- NULL
+  s
+}
+
 # Redact anything that looks like a bearer/secret token before echoing a
 # response body back to the user.
 .scrub_secrets <- function(txt) {
@@ -914,15 +943,22 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
   # depth-capped. Nothing key-bearing escapes into dput/serialize/print/RDS.
   ans <- lapply(ans, .redact_value)
   names(ans) <- .scrub_secrets(.redact_key(as.character(names(questions))))
-  returned_model <- .scrub_secrets(.redact_key(
-    as.character(.as_scalar(raw[["model"]], "character") %||% model)))
+  # R6-B3: the RETURNED identifier is whatever the vendor actually reported;
+  # if the envelope omits it (or reports NA/blank/non-scalar), it stays NA.
+  # The requested alias belongs in model_requested ONLY -- filling the unknown
+  # with the alias would turn "we do not know" into "we know".
+  # R6-B1: .bare_char() scrubs the live key AND drops every attribute, so an
+  # attributes-carrying `model` argument cannot smuggle strings into retained
+  # objects behind the recursive scrub above.
+  returned_model <- .bare_char(.scalar_string(raw[["model"]]))
+  requested_model <- .bare_char(model)
   # Per-answer provenance (round 3 carryover 1): the envelope attribute below
   # is dropped by the $q extraction that jif() and jev_score_many() use, so
   # the alias-drift risk was invisible per row. Attach requested AND returned
-  # model to each answer object itself; both go through the same scrub path as
-  # the envelope attribute, so nothing key-bearing escapes.
+  # model to each answer object itself; both are bare scrubbed scalars, so
+  # nothing key-bearing and no smuggled attributes escape.
   ans <- lapply(ans, function(a) {
-    attr(a, "model_requested") <- .scrub_secrets(.redact_key(model))
+    attr(a, "model_requested") <- requested_model
     attr(a, "model_returned") <- returned_model
     a
   })
@@ -1003,9 +1039,12 @@ jprob <- function(ans) {
 # Accepts a jev_answer object (from jif()'s attr(, "answer")) or a single
 # string from a jev_score_many() result's `probs_json` column. Returns a
 # named numeric vector, or NULL when there is no distribution (noul answers
-# carry a single scalar; failed/abstained rows carry NA). The JSON is written
-# with digits = NA (shortest exact round-trip), so the parsed values are
-# bit-for-bit the vendor's numbers, not 3-decimal display copies.
+# carry a single scalar; an absent distribution parses to NULL). The stored
+# values are the contract validator's NORMALIZED distribution, and the JSON
+# is written with digits = 17 -- enough significant digits that EVERY double
+# re-parses bit-exactly (audit r6 R6-B2: jsonlite's digits = NA caps at 15
+# and loses bits). 17 is not the shortest representation; for a provenance
+# column, bit-exactness beats compactness.
 jprobs <- function(x) {
   keep <- function(v) {
     if (is.null(v) || !length(v)) return(NULL)

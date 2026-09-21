@@ -1725,6 +1725,127 @@ expect("r3p: a 'bytes'-marked state never reaches provenance stamping (rejected 
          grepl("'bytes'-marked", e, fixed = TRUE) && reached == 0L
        }))
 
+# ---- round-6 audit regressions (Astra BLOCK on 96c8f58) ----
+
+expect("r6b1: attributes on the requested-model argument cannot smuggle strings into retention",
+       local({
+         # .scrub_secrets()/.redact_key() sanitize VALUES but preserve
+         # attributes, and the recursive .redact_value ran BEFORE the
+         # provenance attrs were attached -- so an attributes-carrying
+         # `model` rode into answer objects, serialize() output, jif's
+         # answer attr, and saved caches completely unsanitized. The fix
+         # (.bare_char) strips every attribute off both provenance strings.
+         # The sentinel here stands in for a bearer secret echoed as an
+         # attribute (the fake key is set so the exact-substring redaction
+         # path is also exercised, never as the smuggled payload itself).
+         sentinel <- "R6B1FAKE_names_smuggler_9Qa7"
+         keyish <- "sk-R6B1FAKEnested_9Qa7"
+         bad_model <- structure("jev-latest", names = sentinel,
+                                metadata = list(deep = keyish))
+         tr <- function(body) list(model = "safe-returned",
+                                   usage = list(input_tokens = 1L),
+                                   answers = list(q = list(type = "noul", noul = 0.9)))
+         o <- Sys.getenv("TYPESAFE_API_KEY"); Sys.setenv(TYPESAFE_API_KEY = "R6B1envkey_zzz")
+         on.exit(Sys.setenv(TYPESAFE_API_KEY = o), add = TRUE)
+         a <- withr_options(Rjif.transport = tr, jif("s", "q", model = bad_model))
+         ans <- attr(a, "answer")
+         mr <- attr(ans, "model_requested")
+         # (1) the attribute is BARE: exactly one string, zero attributes
+         bare_ok <- is.character(mr) && length(mr) == 1L && is.null(attributes(mr)) &&
+           identical(unname(mr), "jev-latest") &&
+           is.null(attributes(attr(ans, "model_returned")))
+         # (2) the sentinels are absent from serialized retention: the jif
+         #     result, its answer object, and a saved cache written through
+         #     the same smuggled model argument
+         cf <- tempfile(fileext = ".rds")
+         d <- withr_options(Rjif.transport = tr,
+              jev_score_many("s", jev_noul_q("q"), model = bad_model, cache = cf))
+         need <- c(sentinel, keyish)
+         scan_raw <- function(raw, needles) {
+           txt <- rawToChar(raw[raw != as.raw(0)])
+           any(vapply(needles, function(nd) grepl(nd, txt, fixed = TRUE), TRUE))
+         }
+         leak_ser <- any(need %in% c(mr, attr(ans, "model_returned"))) ||
+           scan_raw(serialize(list(a, ans), NULL, version = 2), need)
+         leak_cache <- scan_raw(readBin(cf, "raw", file.size(cf)), need)
+         bare_ok && !leak_ser && !leak_cache && identical(d$model[[1L]], "safe-returned")
+       }))
+
+expect("r6b2: probs_json re-parses BIT-EXACTLY for non-dyadic normalized values, shuffled names, Score and Choice",
+       local({
+         # jsonlite 2.0.0's digits = NA caps at 15 significant digits, so a
+         # normalized distribution like {2:.55, 0:.11, 1:.33} (sum .99, a
+         # VALID contract response -- the score is the weighted mean of the
+         # NORMALIZED values) lost bits through the column. The dyadic
+         # 0.90625 fixture cannot see this. Fix: digits = 17, bit-exact for
+         # every binary64 value by construction.
+         vscore <- c("2" = 0.55, "0" = 0.11, "1" = 0.33)
+         s <- sum(vscore); norm <- vscore / s
+         wm <- sum(norm * as.integer(names(norm)))
+         tr_s <- function(body) list(model = "m", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "score", score = wm, confidence = 0.85,
+             legend = stats::setNames(c("a", "b", "c"), c("0", "1", "2")),
+             probabilities = as.list(vscore))))
+         d1 <- withr_options(Rjif.transport = tr_s,
+              jev_score_many("s", jev_score_q("x", c("a", "b", "c"))))
+         a1 <- withr_options(Rjif.transport = tr_s,
+              jev_eval("s", list(q = jev_score_q("x", c("a", "b", "c")))))$q
+         pb_json <- jprobs(d1$probs_json[[1]])
+         pb_ans <- jprobs(a1)
+         # the validator normalizes the displayed values and keeps the
+         # vendor's key ORDER in the answer (names carry the level indices,
+         # so display order is not semantics); compare as name-keyed sets
+         expect_s <- sort(norm, decreasing = TRUE)  # 2,1,0 by value -- order
+         expect_s <- expect_s[c("0", "1", "2")]     # irrelevant, index by name
+         score_ok <- identical(pb_json[names(expect_s)], expect_s) &&
+           identical(pb_ans[names(expect_s)], expect_s) &&
+           identical(names(pb_json), names(pb_ans)) &&
+           identical(pb_json, pb_ans)
+         vc <- c("b" = 0.33, "a" = 0.66)
+         tr_c <- function(body) list(model = "m", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "choice", choice = "a", confidence = 0.9,
+             probabilities = as.list(vc))))
+         d2 <- withr_options(Rjif.transport = tr_c,
+              jev_score_many("s", jev_choice_q("x", list(a = "first", b = "second"))))
+         pc <- jprobs(d2$probs_json[[1]])
+         # Choice keeps the vendor's key ORDER (probs built from the
+         # displayed list), only the VALUES are normalized
+         expect_c <- stats::setNames(unname(vc / sum(vc)), names(vc))
+         choice_ok <- identical(pc, expect_c)
+         score_ok && choice_ok
+       }))
+
+expect("r6b3: a response with no usable model identifier yields NA, never the requested alias",
+       local({
+         # the vendor not answering "which model?" must stay visibly unknown:
+         # model_returned and the frame's model column go NA for missing,
+         # NULL, blank, multi-element, and non-character envelopes, while
+         # model_requested keeps the alias and the ANSWER is still accepted
+         # (unknown provenance is not a contract violation).
+         tr_missing <- function(body) list(usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "noul", noul = 0.9)))
+         d <- withr_options(Rjif.transport = tr_missing, jev_score_many("s", "x"))
+         missing_ok <- is.na(d$model[[1L]]) && identical(d$decision[[1L]], TRUE) &&
+           identical(d$row_source[[1L]], "api")
+         a <- withr_options(Rjif.transport = tr_missing,
+              jev_eval("s", list(q = jev_noul_q("q"))))$q
+         attr_ok <- is.na(attr(a, "model_returned")) &&
+           identical(attr(a, "model_requested"), "jev-latest")
+         blank <- function(body) c(tr_missing(body), list(model = "   "))
+         vec <- function(body) c(tr_missing(body), list(model = c("m1", "m2")))
+         num <- function(body) c(tr_missing(body), list(model = 42L))
+         lst <- function(body) c(tr_missing(body), list(model = list(name = "m1")))
+         others_ok <- all(vapply(list(blank, vec, num, lst), function(f) {
+           dd <- withr_options(Rjif.transport = f, jev_score_many("s", "x"))
+           is.na(dd$model[[1L]]) && identical(dd$decision[[1L]], TRUE)
+         }, TRUE))
+         # and a normal string model still flows through untouched
+         plain <- withr_options(Rjif.transport = tr_missing,
+                   jev_eval("s", list(q = jev_noul_q("q")), model = "alias-a"))
+         ident_ok <- identical(attr(plain, "model"), NA_character_)
+         missing_ok && attr_ok && others_ok && ident_ok
+       }))
+
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))

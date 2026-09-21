@@ -87,14 +87,18 @@ jprobs(x)
   \code{jprobs()} returns the probability distribution behind an answer
   as a named numeric vector (level indices \code{"0"}..\code{"k-1"} for
   Score, option keys for Choice), or \code{NULL} when there is none (Noul
-  answers carry a single scalar; failed or abstained rows carry \code{NA}).
-  It accepts either a \code{jev_answer} object or a string from a
-  \code{\link{jev_score_many}} result's \code{probs_json} column. The stored
-  values are the contract validator's NORMALIZED distribution (the API's
-  probabilities divided by their displayed sum, which the validator requires
-  to be ~1); the JSON round trip itself is shortest-exact, so parsing
-  reproduces those normalized values bit-for-bit, not independently rounded
-  display copies.
+  answers carry a single scalar). It accepts either a \code{jev_answer}
+  object or a string from a \code{\link{jev_score_many}} result's
+  \code{probs_json} column. The stored values are the contract validator's
+  NORMALIZED distribution (the API's probabilities divided by their
+  displayed sum, which the validator requires to be ~1), written with 17
+  significant digits so parsing reproduces those normalized values
+  bit-for-bit -- not independently rounded display copies, and not the
+  vendor's pre-normalization numbers. A policy-abstained row KEEPS its
+  distribution (the answer arrived; the policy declined to act on it), so
+  \code{jprobs()} returns it; only rows with no answer at all (transport
+  failure, contract violation, NA state) carry \code{NA} in
+  \code{probs_json}.
 }
 \description{
 \code{jev_eval()} sends one state and any number of mixed questions in a

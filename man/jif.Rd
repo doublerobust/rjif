@@ -74,8 +74,9 @@ jif_reason(x)
   uncertain. The result carries attributes \code{abstained}, \code{answer}
   (the full \code{jev_answer} object, readable with \code{\link{jvalue}},
   \code{\link{jprob}}, \code{\link{jconf}}, and \code{\link{jprobs}}; it
-  also carries \code{model_requested} and \code{model_returned} attributes
-  naming the alias you asked for and the resolved model that answered, so
+  also carries \code{model_requested} (the alias you asked for) and
+  \code{model_returned} (the resolved model that answered, \code{NA} when
+  the API did not report one), so
   provenance survives the extraction that previously dropped the envelope),
   and \code{abstain_reason}.
 

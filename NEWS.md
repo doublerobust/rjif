@@ -9,18 +9,22 @@ promises the 0.0.1 docs already made.
 ### Added
 
 - Per-row provenance (round 3 carryover 1). `jev_score_many()` results gain
-  columns `model` (the resolved model that produced that row's answer),
-  `evaluated_at` (UTC, persisted across resumes), `row_source`
+  columns `model` (the resolved model that produced that row's answer;
+  `NA` when the API did not report one -- the requested alias is never
+  substituted), `evaluated_at` (UTC, persisted across resumes), `row_source`
   ("api"/"cache"/"none"), `score_value` (the exact continuous score;
   `option` remains a 3-decimal display), and `probs_json` (the validator's
-  normalized distribution, stored as shortest-round-trip JSON). `jprobs()` parses a `probs_json`
+  normalized distribution, stored as 17-significant-digit JSON that
+  re-parses bit-exactly). `jprobs()` parses a `probs_json`
   string or a `jev_answer` back to a named numeric vector. `jif()`'s
   `answer` attribute now carries `model_requested`/`model_returned`, which
   the `$q` extraction previously dropped with the envelope. Motivation: a
   cached run interrupted across a model-alias change can now distinguish
   day-one rows from day-two rows; before, nothing in the output revealed it.
-- Cache fingerprint version 5L (old v4 caches are refused as before, now
-  with the reason explicit in the version tag).
+- Cache fingerprint version 5L (old v4 caches are refused as before; the
+  version tag carries the reason for anyone inspecting the serialized
+  cache, while the user-facing error stays the generic "stale cache"
+  message).
 
 ### Breaking
 
