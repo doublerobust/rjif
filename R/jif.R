@@ -274,17 +274,32 @@ jev_score_many <- function(state_vec, question, ...,
   # 'translating strings with "bytes" encoding is not allowed'). Rejecting
   # up front fails closed like the state path; same-model resume for
   # supported encodings is unaffected.
-  # Shape gate (author self-audit after round 6e, mirrored from jev_eval):
-  # the model must be a single non-NA, non-blank string BEFORE any cache
-  # work. NULL, "", whitespace-only and the empty list each reduce to
-  # character(0) inside .model_identity, so they all shared ONE cache
-  # identity, while a fresh call serialized them differently (NULL went to
-  # the wire as {"model":{}}, "" as {"model":""}, the list as
-  # {"model":[]}). A rows-entirely-resumed batch never reaches the
-  # jev_eval gate at all, so the check must live here too.
+  # Shape gate (audits r6e follow-up + r6f R6f-B2, mirrored from jev_eval --
+  # the fully-resumed batch never reaches jev_eval's gate, so the check
+  # must live here too). The model must be a single non-NA, non-blank
+  # string BEFORE any cache work. What this gate rejects outright: NULL,
+  # numbers, vectors ({"model":null}, {"model":5}, {"model":["m",...]} --
+  # requests the API's scalar-name contract can never serve). Under the
+  # r6f fingerprint, classed/dimensional character objects (I(), matrix(),
+  # unknown classes) additionally get DISTINCT digest inputs because the
+  # digest now renders them to different JSON bytes; the scan refuses the
+  # ones that cannot render at all. (r6f-m1: an earlier comment here
+  # claimed NULL/""/whitespace/empty-list shared ONE identity -- wrong:
+  # only NULL/character(0)/list() collapse, and "" and " " keep distinct
+  # digests; blank is rejected on the name contract, not a merge claim.)
   if (!(is.character(model) && length(model) == 1L && !is.na(model))) {
     stop("Rjif: model must be a single non-NA string (the model name).",
          call. = FALSE)
+  }
+  # Bare class (mirror of the jev_eval gate, audit r6f R6f-B2): I("m") and
+  # matrix("m",1,1) are is.character() TRUE but render on the wire as
+  # ["m"] and [["m"]]; an unknown class cannot render at all. Harmless
+  # attributes (names, metadata) stay allowed -- identity is a serializer
+  # digest now, and the r6b smuggling test covers those.
+  if (!identical(class(model), "character")) {
+    stop("Rjif: model must be a plain character scalar (class ",
+         paste(class(model), collapse = "/"), " changes or breaks the ",
+         "wire shape of the model name).", call. = FALSE)
   }
   model_bare <- as.character(unname(model))
   if (any(vapply(model_bare, function(s) {
@@ -296,12 +311,12 @@ jev_score_many <- function(state_vec, question, ...,
          call. = FALSE)
   }
   # Blank check AFTER the encoding check above (invalid bytes make grepl
-  # warn): NULL, "", whitespace-only and the empty list all collapse to
-  # character(0) inside .model_identity, so they share one cache identity
-  # while jev_eval behind a fresh call sends them differently.
+  # warn). The rejection stands on the API's scalar-name contract (r6f-m1
+  # corrected my earlier "one shared identity" rationale: only
+  # NULL/character(0)/list() collapse; "" and " " digest distinctly).
   if (!grepl("[^[:space:]]", model)) {
-    stop("Rjif: model must not be blank (whitespace-only): the cache ",
-         "identity collapses blank, empty, and NULL model arguments.",
+    stop("Rjif: model must not be blank (whitespace-only): the API's ",
+         "model field names one model and cannot be empty.",
          call. = FALSE)
   }
   n <- length(state_vec)
@@ -353,11 +368,16 @@ jev_score_many <- function(state_vec, question, ...,
   # bytes-rejecting -- r6e inherited finding + author self-audit c30e434);
   # the model argument is additionally shape-gated (single non-NA,
   # non-blank string) before any cache work, in jev_score_many and jev_eval
-  # both (self-audit dcd91c8: NULL/""/whitespace/empty-list shared one
-  # digest while serializing differently on the wire, and a fully-resumed
-  # batch never reached the jev_eval gate). 5L/6L-era caches predate these
-  # guarantees and are refused as stale.
-  cache_fingerprint <- serialize(list(version = 7L, question = .question_identity(q),
+  # both (self-audit dcd91c8; a fully-resumed batch never reaches the
+  # jev_eval gate). 5L/6L-era caches predate these guarantees and are
+  # refused as stale. Version 8L (audit r6f R6f-B1/B2/n1): the model and
+  # question entries are digests of the SERIALIZER'S OWN OUTPUT (same
+  # body, same JSON_OPTS as the transport; md5 over the rendered UTF-8),
+  # not hand-canonicalized R objects -- the hand recipes missed class
+  # dispatch (I(), unknown classes) and factor levels, letting a
+  # never-sendable or wire-different object resume a valid object's
+  # cache. .wire_slot_scan still names the bad slot before hashing.
+  cache_fingerprint <- serialize(list(version = 8L, question = .question_identity(q),
     model = .bare_char(model), model_id = .model_identity(model),
     n = n, threshold = threshold, floor = confidence_floor,
     states = .state_digest(state_vec)),
@@ -576,87 +596,152 @@ jev_score_many <- function(state_vec, question, ...,
   list(digest = paste(format(d), collapse = ""), n = length(state_vec))
 }
 
-# Cache identity of the model argument (audit r6c R6c-B1, residual r6d
-# R6d-B1). The readable fingerprint entry must be scrubbed for display
-# (r6b R6b-B1: raw attributes smuggled payloads into the saved cache),
-# but the SCRUBBED string must never be the RESUME IDENTITY: display
-# redaction merges distinct aliases ("Bearer option_alpha" and "Bearer
-# option_beta" both become "Bearer [REDACTED]"), which used to let a
-# second alias resume the first alias's decisions with zero calls.
-# Identity is therefore the same whole-content digest used for states,
-# computed on the model EXACTLY AS IT GOES ON THE WIRE (r6d R6d-B1):
-# jsonlite serializes character values by converting from their DECLARED
-# encoding to UTF-8, so two strings sharing bytes c3 a9 -- one flagged
-# UTF-8 ("e-acute"), one flagged latin1 ("A-tilde e-acute") -- post
-# DIFFERENT wire bodies (c3 a9 vs c3 83 c2 a9) and are different models,
-# yet charToRaw of the raw argument digested them identically. enc2utf8()
-# here reproduces that transport conversion on both sides, so the digest
-# matches what the vendor is actually asked to score. Function argument
-# evaluation does NOT drop attributes (auditor's control: an identity
-# function retains them), so the explicit as.character(unname(.))
-# coercion is what keeps an attributes-carrying model out of the digest;
-# the readable entry stays the scrubbed bare string, display-only and
-# explicitly NOT authoritative.
+# Cache identity of the model argument (audits r6c R6c-B1, r6d R6d-B1,
+# r6e R6e-B1, r6f R6f-B2 -- read ALL FOUR before "fixing" this again).
+# The readable fingerprint entry stays .bare_char (r6b: no smuggled
+# attributes; r6c: the redaction-merged marker is display-only, never the
+# resume identity). The RESUME IDENTITY is the digest of the model exactly
+# as this transport's serializer renders it (.wire_digest: the same
+# jsonlite::toJSON options jev_eval uses for the request body, plus the
+# slot-aware fail-closed scan). That replaced hand-reproduced canonicaliza-
+# tion on purpose (r6f): the earlier enc2utf8/as.character recipe missed
+# class/dim dispatch -- I("m") posts ["m"] and a classed "m" cannot post
+# at all, yet both digested equal to plain "m" and resumed its cache.
+# Digesting serializer output cannot lag the serializer. The shape gate in
+# jev_eval/jev_score_many rejects the never-sendable forms up front; the
+# digest makes any wire-visible difference (vector, array, null) a cache
+# mismatch even if a future gate loosens.
 .model_identity <- function(model) {
-  .state_digest(enc2utf8(as.character(unname(model))))
+  .wire_digest(model, "model")
 }
 
-# Fingerprint copy of the question (audit r6e, inherited v4 path): the
-# wire sends question text through jsonlite, which converts every
-# character element from its DECLARED encoding to UTF-8 -- an
-# "unknown"/native-marked string is therefore locale-dependent text. The
-# old fingerprint stored unclass(q) verbatim; R's serializer keeps the
-# bytes and the locale-blind flag, so the SAME question filled in one
-# LC_CTYPE could resume its cache in another locale even though fresh
-# serialization now denotes different words (auditor's cross-locale
-# control: silently resumed 0.9 where a fresh call returned 0.1). Storing
-# enc2utf8-normalized text makes the fingerprint see the words the
-# transport sends: a locale change that reinterprets a native-marked
-# string now mismatches and refuses; same-text resume costs zero calls.
-# Names (option keys, criteria keys) are caller text too and are
-# normalized identically. Not applied to the answer objects or the wire
-# body -- only to the fingerprint copy.
-.question_identity <- function(q) {
-  # Fail closed on text the wire can NEVER send (r6e R6e-B1's class,
-  # re-checked for THIS function by the author after the auditor's round-6e
-  # report): validEnc() is TRUE for Encoding == "bytes" and enc2utf8()
-  # preserves that flag without converting, so a bytes-marked element
-  # would digest identically to the UTF-8-marked copy of its bytes while
-  # jsonlite refuses to serialize it at all. Reject before any cache
-  # lookup, exactly like the state and model paths.
-  check_chr <- function(x, where) {
-    bad <- vapply(x, function(s) !is.na(s) &&
-                              (Encoding(s) == "bytes" || !validEnc(s)),
+# The EXACT serializer options the request body is built with. Used by the
+# transport AND by the cache identity (.wire_digest): the auditor's round
+# 6f showed that hand-reproducing these rules (enc2utf8 + unname walks)
+# lagged jsonlite's actual dispatch -- S3 class effects (I() suppresses
+# auto_unbox; unknown classes fail) and factor levels (the wire sends the
+# LABEL text, invisible to a walk over the R object). One definition, used
+# by both sides, cannot lag. (digits stays at jsonlite's default HERE; the
+# probs_json COLUMN's separate 17-digit serialization is about stored
+# ANSWERS, not the request wire -- do not "unify" them.)
+JSON_OPTS <- list(auto_unbox = TRUE, null = "null")
+
+.wire_json <- function(x) {
+  opt <- JSON_OPTS
+  do.call(jsonlite::toJSON, c(list(x), opt))
+}
+
+# ---- wire-representation cache identity (audit r6f R6f-B1/B2) ----------
+# Digests the object AS THE TRANSPORT WILL SEND IT: the same serializer
+# call and options as .transport_httr's payload line, then md5 over those
+# UTF-8 bytes. Locale dependence is gone (jsonlite output is UTF-8 by
+# construction); class dispatch is captured because it IS the serializer;
+# unknown-class or bytes-marked content fails closed here instead of
+# mid-transport. The slot-aware pre-scan runs first so the error names
+# WHERE the never-sendable string sits (round 6e's guarantee).
+.wire_digest <- function(x, what) {
+  .wire_slot_scan(x, what)   # fail closed, slot-named, before any hashing
+  payload <- tryCatch(as.character(.wire_json(list(.f = x))),
+                      error = function(e) NULL)
+  if (is.null(payload)) {
+    stop("Rjif: ", what, " cannot be serialized into a request with the ",
+         "transport's own serializer (unknown S3 class, unsupported ",
+         "shape, or undisplayable bytes); no cached decision can describe ",
+         "it. Simplify it to plain lists, character vectors, and numbers.",
+         call. = FALSE)
+  }
+  # n = the ARGUMENT's length (the r6c digest had it even where the payload
+  # bytes do not distinguish it, e.g. a length-2 vs length-3 model vector
+  # both rendering as JSON arrays of scalars under this envelope).
+  .digest_rendered(payload, length(x))
+}
+# Deep walk for the SLOT-AWARE refusal and the bytes/invalid-enc fail
+# (round 6e's guarantee, kept): every character element -- including factor
+# LEVELS, which are the wire text of a factor -- must be serializable text.
+# The walk does not decide identity (the serializer's bytes do); it only
+# labels WHERE a never-sendable string sits, before any cache work.
+.wire_slot_scan <- function(x, where) {
+  check_chr <- function(v, slot) {
+    if (is.factor(v)) {
+      # jsonlite sends the LABELS; the levels are the wire text (r6f n1).
+      lv <- levels(v)
+      bad <- vapply(lv, function(s) !is.na(s) &&
+                               (Encoding(s) == "bytes" || !validEnc(s)),
+                   logical(1))
+      if (any(bad)) {
+        stop("Rjif: ", slot, " is a factor whose level labels are ",
+             "'bytes'-marked or contain invalid byte sequences and can ",
+             "never be serialized into a request; re-encode the levels ",
+             "(e.g. stringi::str_conv or iconv) before scoring.",
+             call. = FALSE)
+      }
+      return(invisible(TRUE))
+    }
+    if (!is.character(v)) return(invisible(TRUE))
+    bad <- vapply(v, function(s) !is.na(s) &&
+                             (Encoding(s) == "bytes" || !validEnc(s)),
                   logical(1))
     if (any(bad)) {
-      stop("Rjif: question element ", where, " is 'bytes'-marked or contains ",
-           "invalid byte sequences and can never be serialized into a ",
-           "request; re-encode it (e.g. stringi::str_conv or iconv) before ",
+      stop("Rjif: ", slot, " is 'bytes'-marked or contains invalid byte ",
+           "sequences and can never be serialized into a request; ",
+           "re-encode it (e.g. stringi::str_conv or iconv) before ",
            "scoring.", call. = FALSE)
     }
+    invisible(TRUE)
   }
-  rec_named <- function(x, where) {
+  walk <- function(x, slot) {
+    check_chr(x, slot)
     if (is.list(x)) {
       nx <- names(x)
-      if (!is.null(nx)) check_chr(nx, paste0(where, "[names]"))
-      out <- lapply(seq_along(x), function(i)
-        rec_named(x[[i]], if (!is.null(nx) && nzchar(nx[[i]])) paste0(where, "$", nx[[i]])
-                    else paste0(where, "[[", i, "]]")))
-      # NULL names stay NULL: serializing to "" names would merge two
-      # question shapes (unnamed list vs list explicitly named "") that
-      # the wire sends differently (array vs object keys).
-      if (!is.null(nx)) names(out) <- enc2utf8(unname(nx))
-      return(out)
+      if (!is.null(nx)) check_chr(nx, paste0(slot, "[names]"))
+      for (i in seq_along(x)) {
+        sub <- if (!is.null(nx) && nzchar(nx[[i]])) paste0(slot, "$", nx[[i]])
+               else paste0(slot, "[[", i, "]]")
+        walk(x[[i]], sub)
+      }
     }
-    if (is.character(x)) {
-      check_chr(x, where)
-      nx <- names(x)
-      x <- enc2utf8(unname(x))
-      if (!is.null(nx)) `names<-`(x, enc2utf8(unname(nx))) else x
-    } else x
+    invisible(TRUE)
   }
-  uq <- unclass(q)
-  rec_named(uq, "question")
+  walk(x, where)
+}
+
+# Fingerprint copy of the question (audits r6e inherited finding, r6f
+# R6f-B1/R6f-n1 -- read both before changing): identity is the md5 of the
+# question EXACTLY as this transport serializes it -- same unclass(q) shape
+# jev_eval puts in the body, same JSON_OPTS, rendered text promoted to
+# UTF-8 before hashing (enc2utf8 of jsonlite output makes the digest
+# locale-BLIND by construction: a question whose rendered text changes
+# when LC_CTYPE changes gets a different fingerprint and refuses, which is
+# the r6e-m2 requirement; factor levels ride the serializer, closing
+# r6f-n1, which a hand-written string walk structurally cannot see; and an
+# unknown nested class -- which jsonlite refuses outright -- refuses here
+# too, closing R6f-B1). The .wire_slot_scan runs first so a never-sendable
+# byte sequence names its SLOT instead of surfacing as a generic
+# serializer error. Rounds 6c/6d/6e canonicalized in R by hand and lagged
+# the serializer twice; stop hand-reimplementing it.
+.question_identity <- function(q) {
+  .wire_slot_scan(unclass(q), "question")
+  payload <- tryCatch(as.character(.wire_json(list(q = unclass(q)))),
+                      error = function(e) NULL)
+  if (is.null(payload)) {
+    stop("Rjif: question cannot be serialized into a request with the ",
+         "transport's own serializer (unknown S3 class, unsupported ",
+         "shape, or undisplayable bytes); no cached decision can describe ",
+         "it. Simplify it to plain lists, character vectors, and numbers.",
+         call. = FALSE)
+  }
+  # n = number of question fields (r6c-era digest carried the rebuilt
+  # object's length; keep the same information on the new shape).
+  .digest_rendered(payload, length(unclass(q)))
+}
+
+# md5 over the UTF-8 bytes of a rendered JSON string. n is carried from
+# the digest input's own length (a belt-and-braces entry from r6c: it
+# distinguishes inputs even when the envelope bytes happen not to).
+# Nothing here is a security hash.
+.digest_rendered <- function(payload, n) {
+  d <- openssl::md5(charToRaw(enc2utf8(payload)))
+  list(digest = paste(format(d), collapse = ""), n = as.integer(n))
 }
 
 # The probs_json column's storage envelope (audits r6b R6b-B2, r6c R6c-B2,

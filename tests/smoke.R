@@ -1595,10 +1595,10 @@ expect("r3-1: an old-version cache identity is never trusted (forged on-disk; po
          # that passed vacuously even on old code). The frame KEEPS the
          # current column shape, so the refusal can only come from the
          # version tag inside the identity -- the exact isolation test.
-         # (Version numbers advance with each audit round; forge 7L -> 3L.)
+         # (Version numbers advance with each audit round; forge 8L -> 3L.)
          disk <- readRDS(cf)
          fp <- unserialize(attr(disk, "cache_fingerprint"))
-         stopifnot(identical(fp$version, 7L))
+         stopifnot(identical(fp$version, 8L))
          cur_version <- fp$version
          fp$version <- 3L
          old <- disk; attr(old, "cache_fingerprint") <- serialize(fp, NULL, version = 2)
@@ -2088,11 +2088,28 @@ expect("r6e-m2 question identity is encoding-canonicalized, locale change refuse
                                                            auto_unbox = TRUE))
          wire_differs <- !identical(wire(jev_noul_q(s_latin)),
                                     wire(jev_noul_q(s_utf8)))
-         stable <- identical(qi(jev_noul_q(s_latin)), qi(jev_noul_q(s_latin)))
-         # criteria NAMES are normalized too (they are caller text)
+         stable <- identical(qi(jev_noul_q(s_latin))$digest,
+                             qi(jev_noul_q(s_latin))$digest)
+         # criteria NAMES are wire text too (they become JSON keys): the
+         # same name bytes under two declared encodings render to
+         # different keys, so the fingerprints must differ. Under the
+         # digest design there is no rebuilt object to inspect -- identity
+         # IS the wire bytes, proven against the transport's own options.
          b <- rawToChar(as.raw(c(0xc3, 0xa9)))
-         c1 <- qi(jev_choice_q("x", stats::setNames(list("d1", "d2"), c(b, "z"))))
-         names_ok <- identical(Encoding(names(c1$criteria)[[1L]]), "UTF-8")
+         n_latin <- jev_choice_q("x", stats::setNames(list("d1", "d2"),
+                                                      c(s_latin, "z")))
+         n_utf8 <- jev_choice_q("x", stats::setNames(list("d1", "d2"),
+                                                     c(s_utf8, "z")))
+         names_ok <- !identical(qi(n_latin)$digest, qi(n_utf8)$digest) &&
+           # byte-exactness against the REAL transport render: the digest
+           # equals md5 of the exact body the request would carry
+           identical(qi(n_utf8)$digest, {
+             body <- list(q = unclass(n_utf8))
+             paste(format(openssl::md5(charToRaw(enc2utf8(
+               as.character(do.call(jsonlite::toJSON,
+                                   c(list(body), Rjif:::JSON_OPTS))))))),
+                   collapse = "")
+           })
          # end-to-end: two flags of the same BYTES on a NON-ASCII question
          # must not share a cache even when redaction collapses the readable
          # model entry -- the question entry itself now distinguishes them
@@ -2191,6 +2208,102 @@ expect("r6e gate: model must be a single non-NA string; never a wire shape the A
                              jev_eval("s", list(q = jev_noul_q("q")),
                                       model = "alias-a"))
          all(refused) && batch_refused && reached >= 1L
+       }))
+
+expect("r6f-B1/B2/n1: cache identity IS the serializer's output; classed/dim/factor forms cannot resume or reach the wire",
+       local({
+         # Astra round 6f. B1: .question_identity (a hand-canonicalized
+         # rebuild) dropped nested CLASSES jsonlite dispatches on, so a
+         # never-sendable question (class r6f_unknown on a criterion)
+         # resumed a valid question's 0.9 with zero calls. B2: the model
+         # gate let is.character() TRUE oddities through -- I("m") posts
+         # ["m"], matrix("m",1,1) posts [["m"]], an unknown class cannot
+         # post -- all digested equal to plain "m" and resumed its cache.
+         # n1: factor LEVELS are wire text the R walk never touched.
+         # Closure: identity digests the transport's OWN rendered bytes;
+         # gates reject non-plain-class model scalars up front.
+         n <- 0L
+         tr <- function(body) { n <<- n + 1L
+           list(model = "m", usage = list(input_tokens = 1L),
+                answers = list(q = list(type = "noul", noul = 0.9))) }
+         # B1 end-to-end
+         qa <- jev_noul_q("plain"); qb <- qa
+         qb$extra <- list(structure(list(x = 1), class = "r6f_unknown"))
+         cf <- tempfile(fileext = ".rds")
+         withr_options(Rjif.transport = tr, jev_score_many("s", qa, cache = cf))
+         n0 <- n
+         md5_before <- tools::md5sum(cf)
+         e1 <- tryCatch({ withr_options(Rjif.transport = tr,
+                             jev_score_many("s", qb, cache = cf)); "" },
+                        error = conditionMessage)
+         # the auditor's acceptance criterion: refuse before any call AND
+         # leave the cache byte-intact (the pre-fix defect rewrote it)
+         b1 <- grepl("cannot be serialized", e1, fixed = TRUE) && n == n0 &&
+           identical(md5_before, tools::md5sum(cf))
+         # B2 end-to-end: three wire-shape oddities refuse before calls
+         refused <- vapply(list(I("m"), matrix("m", 1, 1),
+                                structure("m", class = "r6f_unknown")),
+             function(v) {
+               n1 <- n
+               e <- tryCatch({ withr_options(Rjif.transport = tr,
+                                  jev_score_many("s", qa, model = v, cache = cf)); "" },
+                             error = conditionMessage)
+               grepl("plain character scalar", e, fixed = TRUE) && n == n1
+             }, logical(1))
+         # fresh jev_eval gate too (no cache involved)
+         e2 <- tryCatch({ withr_options(Rjif.transport = tr,
+                             jev_eval("s", list(q = qa), model = I("m"))); "" },
+                        error = conditionMessage)
+         # harmless attributes still survive (r6b smuggling contract kept)
+         smuggled <- structure("m", names = "k", metadata = list(a = 1L))
+         n2 <- n
+         ok_attr <- tryCatch({ withr_options(Rjif.transport = tr,
+                 jev_score_many("s", qa, model = smuggled,
+                                cache = tempfile(fileext = ".rds"))); TRUE },
+               error = function(e) FALSE) && n > n2
+         # n1: factor levels render through the serializer, so the
+         # identity is locale-blind BY CONSTRUCTION (digest of UTF-8
+         # output), and unknown factor classes still fail closed
+         f <- structure(1L, levels = "café", class = "factor")
+         qf <- qa; qf$criteria <- list(true = f)
+         d_f <- tryCatch({ Rjif:::.question_identity(qf); TRUE },
+                         error = function(e) FALSE)
+         b1 && all(refused) && grepl("plain character scalar", e2, fixed = TRUE) &&
+           ok_attr && d_f
+       }))
+
+expect("r6f-m1: serializer-based digests separate what the wire separates and merge only true twins",
+       local({
+         # Astra round 6f minor 3: my dcd91c8 comments claimed NULL, "",
+         # whitespace and list() shared ONE cache identity and that NULL
+         # serialized as {}; both claims were wrong (the transport uses
+         # null = "null", and .state_digest's length markers separate
+         # those arguments). Fixed in the same commit's comments/NEWS.
+         # Under the r6f design the facts are cleaner: identity is the
+         # digest of the rendered JSON, so two arguments share a digest
+         # EXACTLY when the wire cannot tell them apart (character(0) and
+         # list() both post []) and differ whenever the wire differs
+         # (NULL -> null, "" -> "", " " -> " "). This test pins THAT
+         # correspondence -- identity == wire, no exceptions.
+         mid <- function(v) Rjif:::.model_identity(v)$digest
+         wire <- function(v) as.character(jsonlite::toJSON(list(model = v),
+                                auto_unbox = TRUE, null = "null"))
+         vs <- list(NULL, "", " ", character(0), list())
+         # equal digest <=> equal wire bytes (plain loops: vapply over a
+         # data frame iterates COLUMNS, ix$a is invalid -- my first
+         # version of this test failed on its own harness, not on Rjif)
+         agree <- TRUE
+         for (i in seq_along(vs)) for (j in seq_along(vs)) {
+           agree <- agree &&
+             (identical(mid(vs[[i]]), mid(vs[[j]])) ==
+              identical(wire(vs[[i]]), wire(vs[[j]])))
+         }
+         # the specific facts the corrected comments state: NULL posts
+         # {"model":null} (NOT {}), and NULL/""/" " are three identities
+         facts <- identical(wire(NULL), "{\"model\":null}") &&
+           length(unique(vapply(list(NULL, "", " "), mid, character(1)))) == 3L &&
+           identical(mid(character(0)), mid(list()))
+         agree && facts
        }))
 
 cat("\n")

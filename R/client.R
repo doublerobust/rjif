@@ -572,7 +572,27 @@ jev_answer_valid <- function(ans, q) {
   # Configuration/serialization failures are not transport failures. Validate
   # once, outside the retry loop, so missing keys and invalid bodies never retry.
   key <- jev_key()
-  payload <- jsonlite::toJSON(body, auto_unbox = TRUE, null = "null")
+  # Envelope shape the IDENTITY is built on. The fingerprint must digest
+  # EXACTLY what the transport sends -- the r6e-m2 test proves byte
+  # identity on this call, so any options drift here or in JSON_OPTS fails
+  # that assertion (round-6f lesson: identity that re-implements the
+  # serializer, even with good options, lags it silently).
+  opts <- JSON_OPTS
+  payload <- tryCatch(
+    as.character(do.call(jsonlite::toJSON,
+                         c(list(body), opts))),
+    error = function(e) {
+      # round 6f (n2): a never-serializable body must say WHY before the
+      # transport is entered; the generic jsonlite message ("No method
+      # asJSON S3 class", "translating strings ... not allowed") is
+      # expanded with the failing class or byte info. Serialization cannot
+      # echo the key (the body holds no key), so no scrub is needed here.
+      msg <- conditionMessage(e)
+      stop(.clean_error_text(paste0(
+        "Rjif: the request could not be serialized (the model or question ",
+        "holds a representation the API cannot receive): ", msg)),
+        call. = FALSE)
+    })
   endpoint <- jev_endpoint()
   attempt <- 0L
   repeat {
@@ -827,20 +847,44 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
   ok <- vapply(questions, inherits, logical(1), "jev_question")
   if (!all(ok)) stop("Rjif: build questions with jev_noul_q/jev_choice_q/jev_score_q.",
                      call. = FALSE)
-  # Model type gate (audit r6e follow-up, author self-audit): the API's
-  # model field is a model NAME -- a single non-NA, non-blank string.
-  # Before this check, model = NULL serialized on the wire as {"model":{}}
-  # and model = 5 as {"model":5}: requests that can never succeed, plus a
-  # cache identity that merged NULL with the EMPTY STRING (both reduce to
-  # character(0) before charToRaw) and with the empty list, while the wire
-  # sends {}, "" and [] for them -- three requests, one cache identity.
-  # Blank (whitespace-only) strings are rejected for the same reason.
-  # Strings marked "bytes" or carrying invalid byte sequences are rejected
-  # too (they can never serialize; the cache path checks again, this gate
-  # covers every call).
+  # Model type gate (audits r6e follow-up + r6f R6f-B2 -- read BOTH
+  # before changing): the API's model field is a model NAME -- a single
+  # non-NA, non-blank string. Before this check, model = NULL serialized
+  # on the wire as {"model":null} and model = 5 as {"model":5}: requests
+  # that can never succeed, surfaced only as opaque vendor 4xx errors.
+  # (r6f-m1 correction of my own first comment here: under this
+  # transport's null = "null" option, NULL renders "null", NOT {}. The
+  # collapse that actually exists is NULL / character(0) / list(): each
+  # reduces to character(0) before any character-level digest. "" and
+  # " " keep distinct digests -- the blank rejection stands on the API's
+  # scalar-name contract, not on an identity-merge claim.)
+  # Class and dimension attributes are NOT dropped by is.character():
+  # I("m") is character-classed ("AsIs") and posts {"model":["m"]},
+  # matrix("m",1,1) posts {"model":[["m"]]}, and
+  # structure("m", class = "r6f_unknown") cannot post at all. Those are
+  # rejected by the digest now riding the serializer itself
+  # (.model_identity, r6f R6f-B2); the is.character + length checks here
+  # still stop the common mistakes with a clear message BEFORE any cache
+  # work. A fully-resumed batch never reaches jev_eval, so
+  # jev_score_many mirrors this gate.
   if (!(is.character(model) && length(model) == 1L && !is.na(model))) {
     stop("Rjif: model must be a single non-NA string (the model name).",
          call. = FALSE)
+  }
+  # Bare class (audit r6f R6f-B2): is.character() is TRUE for I("m")
+  # (class "AsIs") and the wire then posts {"model":["m"]}; matrix("m",1,1)
+  # posts {"model":[[...]]}; structure("m", class = anything-unknown)
+  # cannot post at all ("No method asJSON"). The cache identity is now
+  # built from the serializer's own bytes (r6f fix), so those forms could
+  # no longer RESUME the plain model's cache even if they got this far --
+  # but a fresh jev_eval would still send an array the API's scalar-name
+  # contract rejects, and the r6b smuggling test proves harmless
+  # attributes (names, metadata) DO survive to here and must keep
+  # working, so the gate is exactly: class must be plain "character".
+  if (!identical(class(model), "character")) {
+    stop("Rjif: model must be a plain character scalar (class ",
+         paste(class(model), collapse = "/"), " changes or breaks the ",
+         "wire shape of the model name).", call. = FALSE)
   }
   # Encoding check BEFORE the blank check: grepl() on an invalid-byte
   # string warns ("input string 1 is invalid") while trying to translate,
@@ -852,8 +896,8 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
          "stringi::str_conv or iconv) before scoring.", call. = FALSE)
   }
   if (!grepl("[^[:space:]]", model)) {
-    stop("Rjif: model must not be blank (whitespace-only): the cache ",
-         "identity collapses blank, empty, and NULL model arguments.",
+    stop("Rjif: model must not be blank (whitespace-only): the API's ",
+         "model field names one model and cannot be empty.",
          call. = FALSE)
   }
 
