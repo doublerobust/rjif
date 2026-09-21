@@ -588,24 +588,46 @@ jev_score_many <- function(state_vec, question, ...,
 # normalized identically. Not applied to the answer objects or the wire
 # body -- only to the fingerprint copy.
 .question_identity <- function(q) {
-  canon_chr <- function(x) {
-    nx <- names(x)
-    x <- enc2utf8(unname(x))
-    # setNames would strip the "UTF-8" flags it just set (it copies the
-    # input's attributes), so rebuild the vector and pin names directly.
-    if (!is.null(nx)) `names<-`(x, canon_chr(nx)) else x
+  # Fail closed on text the wire can NEVER send (r6e R6e-B1's class,
+  # re-checked for THIS function by the author after the auditor's round-6e
+  # report): validEnc() is TRUE for Encoding == "bytes" and enc2utf8()
+  # preserves that flag without converting, so a bytes-marked element
+  # would digest identically to the UTF-8-marked copy of its bytes while
+  # jsonlite refuses to serialize it at all. Reject before any cache
+  # lookup, exactly like the state and model paths.
+  check_chr <- function(x, where) {
+    bad <- vapply(x, function(s) !is.na(s) &&
+                              (Encoding(s) == "bytes" || !validEnc(s)),
+                  logical(1))
+    if (any(bad)) {
+      stop("Rjif: question element ", where, " is 'bytes'-marked or contains ",
+           "invalid byte sequences and can never be serialized into a ",
+           "request; re-encode it (e.g. stringi::str_conv or iconv) before ",
+           "scoring.", call. = FALSE)
+    }
   }
-  rec <- function(x) {
+  rec_named <- function(x, where) {
     if (is.list(x)) {
       nx <- names(x)
-      x <- lapply(x, rec)
-      if (!is.null(nx)) names(x) <- canon_chr(nx)
-      return(x)
+      if (!is.null(nx)) check_chr(nx, paste0(where, "[names]"))
+      out <- lapply(seq_along(x), function(i)
+        rec_named(x[[i]], if (!is.null(nx) && nzchar(nx[[i]])) paste0(where, "$", nx[[i]])
+                    else paste0(where, "[[", i, "]]")))
+      # NULL names stay NULL: serializing to "" names would merge two
+      # question shapes (unnamed list vs list explicitly named "") that
+      # the wire sends differently (array vs object keys).
+      if (!is.null(nx)) names(out) <- enc2utf8(unname(nx))
+      return(out)
     }
-    if (is.character(x)) return(canon_chr(x))
-    x
+    if (is.character(x)) {
+      check_chr(x, where)
+      nx <- names(x)
+      x <- enc2utf8(unname(x))
+      if (!is.null(nx)) `names<-`(x, enc2utf8(unname(nx))) else x
+    } else x
   }
-  rec(unclass(q))
+  uq <- unclass(q)
+  rec_named(uq, "question")
 }
 
 # The probs_json column's storage envelope (audits r6b R6b-B2, r6c R6c-B2,

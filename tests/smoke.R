@@ -2115,6 +2115,40 @@ expect("r6e-m2 question identity is encoding-canonicalized, locale change refuse
            seen == 1L
        }))
 
+expect("r6e-m2 question identity: bytes-marked question text fails closed, never digests",
+       local({
+         # R6e-B1's class, re-checked for the M2 fix itself (author audit
+         # after the round-6e report): validEnc() is TRUE for Encoding ==
+         # "bytes" and enc2utf8() preserves the flag, so a bytes-marked
+         # question element would have digested identically to the
+         # UTF-8-marked copy of its bytes while jsonlite refuses to
+         # serialize it at all. The question identity now rejects such text
+         # BEFORE any cache lookup or transport call.
+         b <- rawToChar(as.raw(c(0xc3, 0xa9))); Encoding(b) <- "bytes"
+         qi <- Rjif:::.question_identity
+         e1 <- tryCatch({ qi(jev_noul_q(b)); "" }, error = conditionMessage)
+         e2 <- tryCatch({ qi(jev_choice_q("x",
+                       stats::setNames(list("d1", "d2"), c(b, "z")))); "" },
+                     error = conditionMessage)
+         grepl("bytes", e1, fixed = TRUE) && grepl("bytes", e2, fixed = TRUE) &&
+           # end-to-end: no transport call, cache untouched
+           identical(local({
+             seen <- 0L
+             tr <- function(body) { seen <<- seen + 1L
+               list(model = "m", usage = list(input_tokens = 1L),
+                    answers = list(q = list(type = "noul", noul = 0.9))) }
+             cf <- tempfile(fileext = ".rds")
+             withr_options(Rjif.transport = tr,
+                           jev_score_many("s", jev_noul_q("plain"), cache = cf))
+             before <- tools::md5sum(cf)
+             refused <- FALSE
+             tryCatch(withr_options(Rjif.transport = tr,
+                        jev_score_many("s", jev_noul_q(b), cache = cf)),
+                      error = function(e) refused <<- TRUE)
+             refused && seen == 1L && identical(before, tools::md5sum(cf))
+           }), TRUE)
+       }))
+
 cat("\n")
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
