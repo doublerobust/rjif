@@ -346,9 +346,17 @@ jev_score_many <- function(state_vec, question, ...,
   # element with enc2utf8 BEFORE storing, so the fingerprint sees the same
   # text the wire sends and a locale change between fill and resume now
   # refuses.
-  # Version 6L: model_id digest entry (r6c R6c-B1). Version 7L: the digest
-  # input is the transport-canonicalized model/question (r6e); 5L/6L-era
-  # caches predate the whole pre-release feature and are refused as stale.
+  # Version 6L: model_id digest entry (r6c R6c-B1). Version 7L: the
+  # fingerprint digest inputs are the TRANSPORT-canonicalized model
+  # (.model_identity, rejecting bytes-marked/invalid text -- r6e R6e-B1)
+  # and question (.question_identity, locale-canonicalized and
+  # bytes-rejecting -- r6e inherited finding + author self-audit c30e434);
+  # the model argument is additionally shape-gated (single non-NA,
+  # non-blank string) before any cache work, in jev_score_many and jev_eval
+  # both (self-audit dcd91c8: NULL/""/whitespace/empty-list shared one
+  # digest while serializing differently on the wire, and a fully-resumed
+  # batch never reached the jev_eval gate). 5L/6L-era caches predate these
+  # guarantees and are refused as stale.
   cache_fingerprint <- serialize(list(version = 7L, question = .question_identity(q),
     model = .bare_char(model), model_id = .model_identity(model),
     n = n, threshold = threshold, floor = confidence_floor,
