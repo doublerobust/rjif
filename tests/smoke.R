@@ -1767,8 +1767,18 @@ expect("r6b1: attributes on the requested-model argument cannot smuggle strings 
          }
          leak_ser <- any(need %in% c(mr, attr(ans, "model_returned"))) ||
            scan_raw(serialize(list(a, ans), NULL, version = 2), need)
-         leak_cache <- scan_raw(readBin(cf, "raw", file.size(cf)), need)
-         bare_ok && !leak_ser && !leak_cache && identical(d$model[[1L]], "safe-returned")
+         # R6b-B1: a COMPRESSED byte scan is false assurance -- the payload
+         # is present once decompressed. Scan the cache CONTENT (readRDS ->
+         # serialize), and pin the mechanism: the fingerprint must carry the
+         # model BARE (value kept, attributes stripped).
+         disk <- readRDS(cf)
+         leak_cache <- scan_raw(serialize(disk, NULL, version = 2), need) ||
+           scan_raw(readBin(cf, "raw", file.size(cf)), need)
+         fp <- unserialize(attr(disk, "cache_fingerprint"))
+         fp_bare <- identical(fp$model, "jev-latest") &&
+           is.null(attributes(fp$model))
+         bare_ok && fp_bare && !leak_ser && !leak_cache &&
+           identical(d$model[[1L]], "safe-returned")
        }))
 
 expect("r6b2: probs_json re-parses BIT-EXACTLY for non-dyadic normalized values, shuffled names, Score and Choice",
@@ -1844,6 +1854,40 @@ expect("r6b3: a response with no usable model identifier yields NA, never the re
                    jev_eval("s", list(q = jev_noul_q("q")), model = "alias-a"))
          ident_ok <- identical(attr(plain, "model"), NA_character_)
          missing_ok && attr_ok && others_ok && ident_ok
+       }))
+
+expect("r6b2 collision: redaction-merged Choice labels give ONE consistent distribution, fresh and resumed",
+       local({
+         # R6b-B2: a valid Choice whose distinct labels both contain a
+         # "Bearer <token>" pattern collapses to the same redacted name at
+         # the display boundary. jsonlite refuses duplicate JSON object keys
+         # and used to silently invent ".1" on the column side only, so
+         # jprobs(answer) and jprobs(probs_json) were different vectors and
+         # the wrong entry survived cache/resume. Policy now: make.unique
+         # applied at BOTH write and read, so the two representations are
+         # identical, and the frame keeps its decision p from the
+         # pre-redaction binding (never reconstructed by name here).
+         labels <- c("Bearer option_alpha", "Bearer option_beta")
+         q <- jev_choice_q("x", stats::setNames(list("d1", "d2"), labels))
+         tr <- function(body) list(model = "m", usage = list(input_tokens = 1L),
+           answers = list(q = list(type = "choice", choice = labels[[2L]],
+             confidence = 0.9,
+             probabilities = stats::setNames(list(0.1, 0.9), labels))))
+         cf <- tempfile(fileext = ".rds"); on.exit(unlink(cf))
+         d <- withr_options(Rjif.transport = tr, jev_score_many("n", q, cache = cf))
+         a <- withr_options(Rjif.transport = tr, jev_eval("n", list(q = q)))$q
+         pj <- jprobs(d$probs_json[[1]]); pa <- jprobs(a)
+         same_len <- length(pj) == 2L && identical(unname(pj), c(0.1, 0.9)) &&
+           !anyDuplicated(names(pj))
+         decision_ok <- identical(d$decision[[1L]], FALSE) || !is.na(d$decision[[1L]])
+         # resume must reproduce the SAME names and values (the defective
+         # JSON used to persist through the cache)
+         calls <- 0L
+         tr2 <- function(body) { calls <<- calls + 1L; tr(body) }
+         r <- withr_options(Rjif.transport = tr2, jev_score_many("n", q, cache = cf))
+         resumed <- identical(r$probs_json[[1]], d$probs_json[[1]]) &&
+           identical(jprobs(r$probs_json[[1]]), pj) && calls == 0L
+         identical(pj, pa) && same_len && decision_ok && resumed
        }))
 
 cat("\n")

@@ -1041,10 +1041,12 @@ jprob <- function(ans) {
 # named numeric vector, or NULL when there is no distribution (noul answers
 # carry a single scalar; an absent distribution parses to NULL). The stored
 # values are the contract validator's NORMALIZED distribution, and the JSON
-# is written with digits = 17 -- enough significant digits that EVERY double
-# re-parses bit-exactly (audit r6 R6-B2: jsonlite's digits = NA caps at 15
-# and loses bits). 17 is not the shortest representation; for a provenance
-# column, bit-exactness beats compactness.
+# is written with digits = 17 -- enough significant digits that every
+# positive double re-parses bit-exactly (audit r6 R6-B2: jsonlite's
+# digits = NA caps at 15 and loses bits; r6b M1: the one exception is the
+# sign of negative zero, which parses back as +0 and can never carry
+# decision meaning for a probability). 17 is not the shortest
+# representation; for a provenance column, bit-exactness beats compactness.
 jprobs <- function(x) {
   keep <- function(v) {
     if (is.null(v) || !length(v)) return(NULL)
@@ -1053,9 +1055,18 @@ jprobs <- function(x) {
     # labels lost. Carry the names across the coercion by hand. NA values
     # are kept as-is: provenance reports what the vendor sent, it does not
     # filter it.
+    # Collision policy (audit r6b R6b-B2): display redaction can merge two
+    # distinct Choice labels into ONE name. The probs_json column is written
+    # with make.unique(sep=".") names (jsonlite refuses to serialize
+    # duplicate object keys); the retained answer object keeps the raw
+    # merged names. Renaming the answer path the same way makes the two
+    # representations of one distribution IDENTICAL, which is what a
+    # provenance accessor must guarantee.
     flat <- unlist(v, recursive = TRUE)
     out <- suppressWarnings(as.numeric(flat))
-    names(out) <- names(flat)
+    nms <- names(flat)
+    if (!is.null(nms)) nms <- make.unique(nms, sep = ".")
+    names(out) <- nms
     out
   }
   if (inherits(x, "jev_answer")) return(keep(x$probs))

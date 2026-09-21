@@ -98,7 +98,13 @@ jprobs(x)
   distribution (the answer arrived; the policy declined to act on it), so
   \code{jprobs()} returns it; only rows with no answer at all (transport
   failure, contract violation, NA state) carry \code{NA} in
-  \code{probs_json}.
+  \code{probs_json}. If display redaction merges two originally-distinct
+  option labels into one name, both representations of the distribution are
+  uniquified with \code{.1}/\code{.2} suffixes (\code{make.unique}) so a
+  \code{jev_answer} and its \code{probs_json} column always parse to
+  IDENTICAL vectors; the base names are then shared and no probability
+  should be looked up by the merged name -- the batch frame's \code{p} is
+  bound before redaction and is the authoritative selected value.
 }
 \description{
 \code{jev_eval()} sends one state and any number of mixed questions in a

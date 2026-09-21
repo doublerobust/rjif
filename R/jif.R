@@ -280,8 +280,15 @@ jev_score_many <- function(state_vec, question, ...,
   # evaluated_at, row_source, score_value, probs) -- round 3 carryover 1.
   # An old v4 cache would ALSO fail the frame-shape check, but the version
   # tag makes the reason explicit in the refusal.
+  # The model entry goes in BARE (.bare_char, audit r6b R6b-B1): the
+  # fingerprint is serialized from the caller's raw `model` ARGUMENT, so an
+  # attributes-carrying model string used to smuggle arbitrary payloads into
+  # the saved cache (inherited from the v4 mechanism, not introduced by the
+  # provenance feature). The value is preserved -- distinct aliases keep
+  # distinct resume identities -- only the attribute margins are stripped.
   cache_fingerprint <- serialize(list(version = 5L, question = unclass(q),
-    model = model, n = n, threshold = threshold, floor = confidence_floor,
+    model = .bare_char(model), n = n, threshold = threshold,
+    floor = confidence_floor,
     states = .state_digest(state_vec)),
     NULL, version = 2)
   dec <- rep(NA, n); ps <- rep(NA_real_, n); cf <- rep(NA_real_, n)
@@ -408,12 +415,23 @@ jev_score_many <- function(state_vec, question, ...,
       if (q$type != "noul" && !is.null(ap) && length(ap)) {
         # ap is the validator's NORMALIZED distribution (probs, post /sum).
         # digits = 17: every double round-trips exactly through 17
-        # significant decimal digits (a fixed property of binary64), so
-        # jprobs() reproduces the validator's numbers identically. This is
-        # NOT the shortest representation -- jsonlite's digits = NA caps at
-        # 15 significant digits and loses bits (audit r6 R6-B2 caught the
-        # old claim). Longer text is the right trade for a provenance column:
-        # it must be byte-stable AND bit-exact.
+        # significant decimal digits (a fixed property of binary64 for
+        # positive values; -0 keeps its VALUE -- a valid probability cannot
+        # be below 0, and the sign of a zero never enters a decision), so
+        # jprobs() reproduces the validator's numbers rather than adding a
+        # second, independently rounded copy. This is NOT the shortest
+        # representation -- jsonlite's digits = NA caps at 15 significant
+        # digits and loses bits (audit r6 R6-B2 caught the old claim).
+        # Longer text is the right trade for a provenance column: it must
+        # be byte-stable AND bit-exact.
+        # Collision policy (audit r6b R6b-B2): display redaction can merge
+        # two distinct Choice labels into ONE name. The probs_json column is
+        # written with make.unique(sep=".") names (jsonlite refuses to
+        # serialize duplicate object keys); the retained answer object keeps
+        # the raw merged names. Renaming the answer path the same way makes
+        # the two representations of one distribution IDENTICAL, which is
+        # what a provenance accessor must guarantee.
+        if (!is.null(names(ap))) names(ap) <- make.unique(names(ap), sep = ".")
         probs_json[j] <- jsonlite::toJSON(as.list(ap), digits = 17,
                                           auto_unbox = TRUE, na = "null")
       }

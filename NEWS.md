@@ -58,6 +58,32 @@ promises the 0.0.1 docs already made.
 - `DESCRIPTION` gains `openssl (>= 0.8)` in Imports. It is already an
   unconditional dependency of `httr`, so no new software is installed by this.
 
+### Fixed (external audits of the provenance feature, rounds 6 and 6b)
+
+- Provenance strings (`model_requested`, `model_returned`, the batch
+  `model` column) are scrubbed AND stripped of all attributes before
+  attachment: an attributes-carrying `model` argument can no longer
+  smuggle arbitrary strings into retained answer objects, serialized
+  results, or saved caches (r6 R6-B1; the same bare-value rule now also
+  applies to the model entry inside the cache fingerprint, an inherited
+  v4-era retention path, r6b R6b-B1).
+- `probs_json` is written with 17 significant digits: jsonlite's
+  `digits = NA` caps at 15 and silently lost bits for non-dyadic
+  normalized probabilities (r6 R6-B2). Positive doubles re-parses
+  bit-exactly; the only exception is negative zero's sign, which cannot
+  carry decision meaning for a probability (r6b R6b-M1).
+- A response that reports no usable model identifier yields `NA`
+  provenance instead of silently substituting the requested alias, which
+  had turned "the vendor did not say" into apparently-known provenance
+  (r6 R6-B3). The answer itself is still accepted; the alias remains
+  visible in `model_requested`.
+- Redaction-merged Choice labels no longer produce two disagreeing
+  representations of one distribution: the stored JSON and the answer
+  object are uniquified with the same `make.unique` suffixes, so
+  `jprobs()` is identical whichever side parses, fresh and after
+  resume (r6b R6b-B2). Selected probabilities stay looked up from the
+  pre-redaction binding (`p` column), never by a merged name.
+
 ### Changed
 
 - `selection_curve()` gains `policy = "positive" | "two_sided"` (default

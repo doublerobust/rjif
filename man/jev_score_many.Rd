@@ -119,6 +119,9 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
   validator's normalized probability distribution as a 17-significant-digit
   JSON string that re-parses bit-exactly, parseable with
   \code{\link{jprobs}}; \code{NA} for Noul and for rows without one).
+  When display redaction merges distinct option labels, the stored keys are
+  uniquified (\code{.1} suffix) exactly as \code{\link{jprobs}} reports
+  them, so the column and the answer object never disagree (audit r6b).
   Together they distinguish rows judged before and after a model alias
   changed underneath an interrupted cached run. Attributes
   \code{n_abstained} and \code{question_type} summarise the run,
