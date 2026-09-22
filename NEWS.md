@@ -248,7 +248,7 @@ promises the 0.0.1 docs already made.
   md5 over a plain `jsonlite::toJSON` render of the server-parsed wire
   object, no package helper involved. Verified against all four mutation
   libraries from round 6i: identity (4 fails), transport (1), model-wire
-  (5), selective (2) -- every deliberate drift is now detected, and the
+  (4), selective (2) -- every deliberate drift is now detected, and the
   pristine suite passes 10/10 in both modes.
 - Round 6i R6i-n1 (low, documentation): the 6h help text overclaimed
   ("perform no other pattern scrubbing", "echoes it verbatim") where
