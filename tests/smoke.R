@@ -2447,6 +2447,33 @@ expect("r6h: cache diagnostics redacted, validated render, used-level factors",
     b1a <- nzchar(e1) && !grepl(KEYH, e1, fixed = TRUE) &&
       grepl("REDACTED-API-KEY", e1, fixed = TRUE) &&
       grepl("Nothing was written", e1, fixed = TRUE)
+    # r6i-B1: readRDS's OWN low-level warnings (directory path,
+    # permission-denied file) carry the raw path and fire BEFORE the error
+    # handler; they must be muffled, and the outward warning set key-free.
+    leakW <- function(expr) {
+      w <- character()
+      withCallingHandlers(
+        tryCatch(force(expr), error = function(e) NULL),
+        warning = function(z) { w <<- c(w, conditionMessage(z))
+                               invokeRestart("muffleWarning") })
+      any(grepl(KEYH, w, fixed = TRUE))
+    }
+    dirA <- file.path(tempdir(), paste0("r6i-dir-", KEYH))
+    dir.create(dirA, showWarnings = FALSE)
+    b1d <- !leakW(jev_score_many("s", jev_noul_q("q"), model = "m", cache = dirA))
+    permB <- file.path(tempdir(), paste0("r6i-perm-", KEYH))
+    saveRDS(list(1), permB)
+    Sys.chmod(permB, "0000")
+    b1e <- !leakW(jev_score_many("s", jev_noul_q("q"), model = "m", cache = permB))
+    Sys.chmod(permB, "0644")
+    # honest path: echoed verbatim, no redaction markers, no file rewrite.
+    # The basename must not MATCH a secret pattern (a name like R6I_foo
+    # would legitimately redact; *** is pattern-free).
+    honest <- file.path(tempdir(), "honestproject42.rds")
+    writeBin(charToRaw("not an RDS"), honest)
+    eh <- err_msg(jev_score_many("s", jev_noul_q("q"), model = "m", cache = honest))
+    b1f <- grepl("honestproject42.rds", eh, fixed = TRUE) &&
+      !grepl("REDACTED", eh, fixed = TRUE)
     # mismatch: a VALID cache whose fingerprint differs (threshold 0.7 seed,
     # called at 0.5). Lives in a dir AND file named with the key.
     seed <- file.path(tempdir(), "r6h-seed.rds")
@@ -2503,7 +2530,8 @@ expect("r6h: cache diagnostics redacted, validated render, used-level factors",
     qt <- jev_noul_q("q"); qt$instructions <- list(when = as.POSIXlt(Sys.time()))
     flow3 <- isTRUE(tryCatch({ jev_eval("s", list(q = qt), model = "m"); TRUE },
                              error = function(e) FALSE))
-    b1a && b1b && b1c && b2a && b2b && b2c && flow1 && flow2 && flow3
+    b1a && b1b && b1c && b1d && b1e && b1f && b2a && b2b && b2c &&
+      flow1 && flow2 && flow3
   }))
 
 if (fail > 0L) {

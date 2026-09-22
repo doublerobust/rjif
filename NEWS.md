@@ -153,7 +153,7 @@ promises the 0.0.1 docs already made.
   across an LC_CTYPE change that reinterprets it into different words;
   same-text resume still costs zero calls.
 
-### Fixed (external audit rounds 6f and 6g, identity rebuilt on the wire)
+### Fixed (external audit rounds 6f through 6i, identity rebuilt on the wire)
 
 - Round 6f (blockers R6f-B1/B2, minor R6f-n1): the cache identity is now
   the MD5 of the request envelope as `jsonlite::toJSON` renders it with
@@ -227,6 +227,37 @@ promises the 0.0.1 docs already made.
   plus pattern-based; credential FRAGMENTS are not detected. Documented
   in `?jev_score_many` rather than defended by a heuristic that would
   mangle honest paths.
+- Round 6i R6i-B1 (blocker, finishing the 6h repair): round 6h muffled
+  the WRITE side (`saveRDS`) but not the READ side -- `readRDS`'s own
+  low-level warnings ("cannot open file '<path>': it is a directory",
+  "probable reason 'Permission denied'") carry the raw path and fire
+  BEFORE the error handler, so a key-named directory or an unreadable
+  key-named file still echoed the live key. The read is now wrapped in
+  `suppressWarnings`; the caller's report remains the scrubbed,
+  untruncated package error. Committed tests pin the directory and
+  permission-denied cases (the 6h block had only pinned bad-bytes, which
+  never warns), plus a pattern-free honest path that must echo verbatim
+  -- the negative control that keeps redaction from mangling normal
+  paths.
+- Round 6i R6i-m1 (medium, test oracle): `r16-wire-capture.R` proved
+  the wire bytes but its identity checks recomputed the expected digest
+  with the SAME helper under test -- a contamination of
+  `.question_identity`/`.model_identity` cancelled on both sides and all
+  ten checks passed (the auditor's `mut-identity` mutation demonstrated
+  this). W3/W4/W7/W8 now build the expected digest INDEPENDENTLY --
+  md5 over a plain `jsonlite::toJSON` render of the server-parsed wire
+  object, no package helper involved. Verified against all four mutation
+  libraries from round 6i: identity (4 fails), transport (1), model-wire
+  (5), selective (2) -- every deliberate drift is now detected, and the
+  pristine suite passes 10/10 in both modes.
+- Round 6i R6i-n1 (low, documentation): the 6h help text overclaimed
+  ("perform no other pattern scrubbing", "echoes it verbatim") where
+  `.redact_only` does run recognized secret-pattern replacement and
+  control-character collapsing. Reworded to describe exactly what the
+  code does: exact configured-key redaction anywhere in the message,
+  recognized bearer/sk- pattern replacement, newlines/controls to
+  spaces, arbitrary fragments NOT detected, message-only (never the
+  path).
 
 ### Changed
 

@@ -414,7 +414,16 @@ jev_score_many <- function(state_vec, question, ...,
       stop("Rjif: cache must be a single path string (or NULL).", call. = FALSE)
     }
     if (file.exists(cache)) {
-      prev <- tryCatch(readRDS(cache), error = function(e) {
+      # Audit r6i R6i-B1: readRDS's OWN low-level warnings ("cannot open
+      # file '<path>': it is a directory", "... probable reason 'Permission
+      # denied'") carry the RAW path and fire BEFORE the error handler --
+      # exactly the read-side twin of the saveRDS warning muffled in
+      # .cache_save. A key-named file or directory leaked the live key
+      # through them even though the package error below is redacted.
+      # Muffle here: the caller's report is the scrubbed error, whose
+      # cause text comes from the ERROR message (already path-free after
+      # .clean_error_text), not from the raw warning.
+      prev <- suppressWarnings(tryCatch(readRDS(cache), error = function(e) {
         # The file exists but is not a readable RDS. It may not be a cache at
         # all; refusing beats silently overwriting the caller's bytes.
         # (audit r6h R6h-B1: the PATH is caller text -- a key-named cache
@@ -426,7 +435,7 @@ jev_score_many <- function(state_vec, question, ...,
              "). Nothing was written to it: point 'cache' at a different path, ",
              "or delete/rename the file if you meant to start over.")),
              call. = FALSE)
-      })
+      }))
       if (.cache_valid(prev, n, cache_fingerprint)) {
         dec <- prev$decision; chosen <- prev$option; ps <- prev$p
         cf <- prev$confidence; abst <- prev$abstained; errs <- prev$error

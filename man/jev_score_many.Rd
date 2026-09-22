@@ -68,10 +68,13 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     protect the file accordingly. The digest is an accident detector, not a
     security hash or de-identification. Cache-path errors and warnings
     (unreadable file, fingerprint mismatch, failed write) redact the
-    configured API key wherever it appears in the path, but perform no
-    other pattern scrubbing: credential \emph{fragments} are not detected,
-    and a path that exposes something else (a name, a project id) echoes
-    it verbatim. The path itself is never rewritten, only the message.}
+    configured API key wherever it appears in the message, replace text
+    matching recognized secret patterns (bearer tokens, vendor key
+    prefixes), and collapse control characters and newlines to spaces.
+    Arbitrary credential \emph{fragments} are not detected and other
+    sensitive path content (a name, a project id) normally echoes
+    verbatim, so a path can still disclose data. Only the message
+    changes; the file keeps its own name and bytes.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
     \code{"jev-latest"}. Must be a single non-NA, non-blank string; see

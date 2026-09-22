@@ -71,6 +71,12 @@ if (.Platform$OS.type != "windows" && requireNamespace("httpuv", quietly = TRUE)
               options(old_opts) }, add = TRUE)
 
     # ---- 1. recording mock: the r6g preflight render -----------------------
+    # Fixture carries a null JSON field (criteria = NULL renders
+    # "criteria":null -- tests the null="null" policy end to end) and a
+    # 1.123456789 extra field (proves the oracle agreement holds under the
+    # serializer's digit rounding: identity describes the WIRE value).
+    qf <- jev_noul_q("q")
+    qf$precision <- 1.123456789
     recorded <- new.env(parent = emptyenv())
     recorded$n <- 0L
     rec_tr <- function(body) {
@@ -80,47 +86,66 @@ if (.Platform$OS.type != "windows" && requireNamespace("httpuv", quietly = TRUE)
            answers = list(q = list(type = "noul", noul = 0.9)))
     }
     options(Rjif.transport = rec_tr)
-    a <- jev_eval("s", list(q = jev_noul_q("q")))
+    a <- jev_eval("s", list(q = qf))
     preflight_render <- recorded$render
 
     # ---- 2. real transport: the bytes httr::POST actually sent -------------
     options(Rjif.transport = NULL, Rjif.api_base = paste0("http://127.0.0.1:", port, "/direct"))
-    b2 <- jev_eval("s", list(q = jev_noul_q("q")))
+    b2 <- jev_eval("s", list(q = qf))
     wire <- readBin(file.path(tmp, "body-direct-1.json"), "raw", 1e6)
     wire_txt <- rawToChar(wire)
     Encoding(wire_txt) <- "UTF-8"
     check("W1 real POST body is byte-identical to the preflight render",
           identical(preflight_render, wire_txt))
-    check("W2 mock transport saw exactly one render", identical(recorded$n, 1L))
+    check("W2 mock transport was entered exactly once (render count is its own env)",
+          identical(recorded$n, 1L))
 
     # ---- 3. cache identity recomputed FROM THE PARSED WIRE ------------------
     parsed <- jsonlite::fromJSON(wire_txt, simplifyVector = FALSE)
-    qid_now <- question_identity(parsed$questions[[1]])
-    check("W3 question digest recomputes from the API-parsed wire body",
-          identical(qid_now$digest, question_identity(jev_noul_q("q"))$digest))
-    check("W4 model digest recomputes from the API-parsed wire body",
-          identical(model_identity(parsed$model)$digest,
-                    model_identity("wire-model")$digest))
+    # Independent oracle (audit r6i R6i-m1): the expected digest is built
+    # HERE from the server-parsed wire object with jsonlite's serializer and
+    # the documented envelope shape -- md5 over the rendered bytes -- WITHOUT
+    # calling .question_identity/.model_identity on the expected side. If a
+    # mutation contaminated those helpers, their output and the cache would
+    # agree while BOTH left the wire; this oracle cannot cancel with them.
+    indep_digest <- function(x, n) {
+      payload <- as.character(jsonlite::toJSON(x, auto_unbox = TRUE, null = "null"))
+      stopifnot(validUTF8(payload), jsonlite::validate(payload))
+      d <- openssl::md5(charToRaw(enc2utf8(payload)))
+      list(digest = paste(format(d), collapse = ""), n = as.integer(n))
+    }
+    q_expect <- indep_digest(list(q = parsed$questions[[1]]),
+                             length(parsed$questions[[1]]))
+    q_now <- question_identity(parsed$questions[[1]])
+    check("W3 question digest == INDEPENDENT render of the API-parsed wire",
+          identical(q_expect, q_now))
+    m_expect <- indep_digest(list(.f = parsed$model), 1L)
+    m_now <- model_identity(parsed$model)
+    check("W4 model digest == INDEPENDENT render of the API-parsed wire",
+          identical(m_expect, m_now))
     check("W5 wire model is the bare character the API names",
           identical(parsed$model, "wire-model"))
 
     # ---- 4. through the cache: fingerprint vs parsed batch wire ------------
     cf <- tempfile(fileext = ".rds")
     options(Rjif.api_base = paste0("http://127.0.0.1:", port, "/batch"))
-    m <- jev_score_many("s", jev_noul_q("q"), cache = cf, quiet = TRUE)
+    m <- jev_score_many("s", qf, cache = cf, quiet = TRUE)
     bwire <- readBin(file.path(tmp, "body-batch-1.json"), "raw", 1e6)
     btxt <- rawToChar(bwire); Encoding(btxt) <- "UTF-8"
     bparsed <- jsonlite::fromJSON(btxt, simplifyVector = FALSE)
     df <- readRDS(cf)
     fp <- unserialize(attr(df, "cache_fingerprint", exact = TRUE))
     check("W6 cache fingerprint is version 8", identical(fp$version, 8L))
-    check("W7 cached question digest == identity recomputed from the real batch wire",
-          identical(fp$question$digest, question_identity(bparsed$questions[[1]])$digest))
-    check("W8 cached model digest == identity recomputed from the real batch wire",
-          identical(fp$model_id$digest, model_identity(bparsed$model)$digest))
+    check("W7 cached question digest == INDEPENDENT render of the batch wire",
+          identical(fp$question$digest,
+                    indep_digest(list(q = bparsed$questions[[1]]),
+                                 length(bparsed$questions[[1]]))$digest))
+    check("W8 cached model digest == INDEPENDENT render of the batch wire",
+          identical(fp$model_id$digest,
+                    indep_digest(list(.f = bparsed$model), 1L)$digest))
     check("W9 cached bare model == wire model", identical(fp$model, bare_char(bparsed$model)))
     # resume must hit the fingerprint (no second POST): count batch bodies
-    m2 <- jev_score_many("s", jev_noul_q("q"), cache = cf, quiet = TRUE)
+    m2 <- jev_score_many("s", qf, cache = cf, quiet = TRUE)
     check("W10 identical rerun resumes from cache (no second batch POST)",
           !file.exists(file.path(tmp, "body-batch-2.json")) && identical(m2$decision, m$decision))
     options(old_opts)
