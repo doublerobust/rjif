@@ -66,7 +66,12 @@ jmatch(state, branches, ..., instructions = NULL, confidence_floor = 0,
     criteria, run settings, and results in row order. Plaintext states are
     not stored (only their digest), but this can still disclose your data:
     protect the file accordingly. The digest is an accident detector, not a
-    security hash or de-identification.}
+    security hash or de-identification. Cache-path errors and warnings
+    (unreadable file, fingerprint mismatch, failed write) redact the
+    configured API key wherever it appears in the path, but perform no
+    other pattern scrubbing: credential \emph{fragments} are not detected,
+    and a path that exposes something else (a name, a project id) echoes
+    it verbatim. The path itself is never rewritten, only the message.}
 
   \item{model}{Jev model name; defaults to the \code{Rjif.model} option, then
     \code{"jev-latest"}. Must be a single non-NA, non-blank string; see

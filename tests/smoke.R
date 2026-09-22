@@ -2424,6 +2424,88 @@ expect("r6g-B1/n1/m1/m2/B2: caller text scrubbed at gates, used-level-only facto
          b1 && b2 && m1 && m2 && n1res
        }))
 
+# ---- audit round 6h (R6h-B1 B2 m1): cache-diagnostic redaction, validated
+# wire render, used-level-only factor scan. r16-wire-capture.R proves the
+# real-transport half; this pins the refusals and positive controls.
+expect("r6h: cache diagnostics redacted, validated render, used-level factors",
+  local({
+    KEYH <- "R6HSYNTHKEY9Q7"
+    bstr <- "\x81\x82not valid utf-8"
+    tr_ok <- function(body) list(model = "m", usage = list(input_tokens = 1L),
+                                 answers = list(q = list(type = "noul", noul = 0.9)))
+    entered <- 0L
+    tr_count <- function(body) { entered <<- entered + 1L; tr_ok(body) }
+    o <- options(Rjif.transport = tr_ok, Rjif.retries = 0L)
+    Sys.setenv(TYPESAFE_API_KEY = KEYH)
+    on.exit({ options(o); Sys.unsetenv("TYPESAFE_API_KEY") }, add = TRUE)
+
+    # --- B1: key-named cache path must not echo the key (3 sites) ---
+    dir.create(dnames <- tempfile()); dir.create(file.path(dnames, KEYH))
+    badfile <- file.path(dnames, KEYH, paste0(KEYH, ".rds"))
+    writeBin(charToRaw("not an RDS at all"), badfile)
+    e1 <- err_msg(jev_score_many("s", jev_noul_q("q"), model = "m", cache = badfile))
+    b1a <- nzchar(e1) && !grepl(KEYH, e1, fixed = TRUE) &&
+      grepl("REDACTED-API-KEY", e1, fixed = TRUE) &&
+      grepl("Nothing was written", e1, fixed = TRUE)
+    # mismatch: a VALID cache whose fingerprint differs (threshold 0.7 seed,
+    # called at 0.5). Lives in a dir AND file named with the key.
+    seed <- file.path(tempdir(), "r6h-seed.rds")
+    if (file.exists(seed)) file.remove(seed)
+    jev_score_many("s", jev_noul_q("q"), model = "m", cache = seed, threshold = 0.7)
+    keynamed <- file.path(dnames, KEYH, paste0("c-", KEYH, ".rds"))
+    file.copy(seed, keynamed)
+    e2 <- err_msg(jev_score_many("s", jev_noul_q("q"), model = "m", cache = keynamed))
+    b1b <- nzchar(e2) && !grepl(KEYH, e2, fixed = TRUE) &&
+      grepl("REDACTED-API-KEY", e2, fixed = TRUE) &&
+      grepl("NOT overwritten", e2, fixed = TRUE)
+    # write-failure warning: read-only dir named with the key (chmod the
+    # KEY dir itself: .cache_save writes tmp + target INSIDE dirname(cache),
+    # so chmod of the grandparent would not block it). saveRDS's own
+    # low-level warning must be suppressed, the package warning redacted.
+    ro <- file.mode(file.path(dnames, KEYH))
+    Sys.chmod(file.path(dnames, KEYH), "0555")
+    allw <- warn_msg(jev_score_many("s", jev_noul_q("q"), model = "m",
+                                    cache = file.path(dnames, KEYH, "writefail.rds")))
+    Sys.chmod(file.path(dnames, KEYH), ro)
+    b1c <- nzchar(allw) && !grepl(KEYH, allw, fixed = TRUE)
+
+    # --- B2: invalid UTF-8 under classed wrappers refuses, zero calls ---
+    n0 <- entered
+    options(Rjif.transport = tr_count)
+    qI <- jev_noul_q("q"); qI$instructions <- I(bstr)
+    qDF <- jev_noul_q("q"); qDF$instructions <- data.frame(x = bstr, stringsAsFactors = FALSE)
+    refused <- TRUE
+    for (qbad in list(qI, qDF)) {
+      e <- err_msg(jev_eval("s", list(q = qbad), model = "m"))
+      # either line of defense may fire first: the slot scan naming the bad
+      # slot, or the validated envelope render. Both are refusals.
+      refused <- refused && nzchar(e) &&
+        (grepl("not valid JSON/UTF-8", e, fixed = TRUE) ||
+         grepl("never be serialized", e, fixed = TRUE))
+    }
+    b2a <- refused && entered == n0
+    # the cache identity refuses the SAME envelope the transport would
+    e <- err_msg(Rjif:::.question_identity(qDF))
+    b2b <- nzchar(e) && grepl("not valid JSON/UTF-8", e, fixed = TRUE)
+    # canonical phrase survives on the unknown-class route (r6f grep)
+    e <- err_msg(Rjif:::.wire_digest(structure("m", class = "unknownclass9"), "model"))
+    b2c <- nzchar(e) && grepl("cannot be serialized", e, fixed = TRUE)
+
+    # --- positive controls: valid payloads still flow (r6g-m1/m2) ---
+    v1 <- jev_eval("s", list(q = jev_noul_q("q")), model = "m")
+    flow1 <- identical(jprob(v1$q), 0.9) && entered > n0
+    # factor whose UNUSED level is bytes-marked: flows (r6g-m1)
+    fl <- factor("a", levels = c("a", bstr))
+    qFL <- jev_score_q("q", c("yes", "no")); qFL$instructions <- list(lvl = fl)
+    flow2 <- isTRUE(tryCatch({ jev_eval("s", list(q = qFL), model = "m"); TRUE },
+                             error = function(x) FALSE))
+    # POSIXlt nested in a plain list: no hang, flows (r6g-m2)
+    qt <- jev_noul_q("q"); qt$instructions <- list(when = as.POSIXlt(Sys.time()))
+    flow3 <- isTRUE(tryCatch({ jev_eval("s", list(q = qt), model = "m"); TRUE },
+                             error = function(e) FALSE))
+    b1a && b1b && b1c && b2a && b2b && b2c && flow1 && flow2 && flow3
+  }))
+
 if (fail > 0L) {
   cat(sprintf("SMOKE FAILED: %d assertion(s)\n", fail))
   quit(save = "no", status = 1L)

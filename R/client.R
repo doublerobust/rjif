@@ -124,6 +124,20 @@ jev_key <- function() {
   trimws(txt)
 }
 
+# Redaction WITHOUT truncation (audit r6h R6h-B1 fix review): for messages
+# this package composes itself -- fixed informative text plus one caller-
+# supplied span (a cache path, a class vector) -- the full .clean_error_text
+# 240-byte cap would cut the contract-bearing tail of the sentence (the f5
+# refusal promises "NOT overwritten"; cutting it would launder a behavior
+# claim). Exact-key + pattern redaction and whitespace/control-char
+# neutralizing still apply, which is the retention invariant; length does
+# not threaten it.
+.redact_only <- function(txt) {
+  txt <- .redact_key(txt)
+  txt <- .scrub_secrets(txt)
+  gsub("[\r\n\t\001-\037]", " ", txt, perl = TRUE)
+}
+
 # Replace the caller's actual API key, wherever it appears in text that is about
 # to become an error, warning, or persisted string. Pattern-based scrubbing
 # alone cannot catch an opaque key echoed back by the vendor, so every outward
@@ -577,10 +591,12 @@ jev_answer_valid <- function(ans, q) {
   # identity on this call, so any options drift here or in JSON_OPTS fails
   # that assertion (round-6f lesson: identity that re-implements the
   # serializer, even with good options, lags it silently).
-  opts <- JSON_OPTS
+  # Validated render (audit r6h R6h-B2): the bytes that go to hashing or
+  # transport must be valid JSON/UTF-8, not merely returned by toJSON.
+  # .wire_render reads JSON_OPTS directly -- the same single source the
+  # identity digests use, so transport and identity can never disagree.
   payload <- tryCatch(
-    as.character(do.call(jsonlite::toJSON,
-                         c(list(body), opts))),
+    .wire_render(body, "the request"),
     error = function(e) {
       # round 6f (n2): a never-serializable body must say WHY before the
       # transport is entered; the generic jsonlite message ("No method
@@ -588,6 +604,7 @@ jev_answer_valid <- function(ans, q) {
       # expanded with the failing class or byte info. Serialization cannot
       # echo the key (the body holds no key), so no scrub is needed here.
       msg <- conditionMessage(e)
+      if (startsWith(msg, "Rjif: ")) stop(msg, call. = FALSE)
       stop(.clean_error_text(paste0(
         "Rjif: the request could not be serialized (the model or question ",
         "holds a representation the API cannot receive): ", msg)),
@@ -929,14 +946,21 @@ jev_eval <- function(state, questions, model = getOption("Rjif.model", "jev-late
   # render below is the second line of defense for what a text scan cannot
   # see (unknown S3 classes).
   for (q in body$questions) .wire_slot_scan(q, "question")
-  invisible(tryCatch({
-      as.character(do.call(jsonlite::toJSON, c(list(body), JSON_OPTS)))
-    },
-    error = function(e) {
+  # Validated render (audit r6h R6h-B2): the r6g preflight only proved
+  # toJSON did not THROW. Invalid UTF-8 under a classed wrapper (I(),
+  # data.frame) renders WITHOUT an error but emits malformed JSON that
+  # jsonlite's own validator rejects -- the old preflight, the identity,
+  # and the transport all waved it through, so a callback could answer an
+  # unsendable request and the batch could cache it. Same helper, same
+  # JSON_OPTS, same bytes as the transport and the digests: refusal here
+  # is a property of the ENVELOPE, not of one caller's scanner.
+  invisible(tryCatch(.wire_render(body, "the request"), error = function(e) {
+      msg <- conditionMessage(e)
+      if (startsWith(msg, "Rjif: ")) stop(msg, call. = FALSE)
       stop(.clean_error_text(paste0(
         "Rjif: the request could not be serialized (the model or question ",
         "holds a representation the API cannot receive): ",
-        conditionMessage(e))), call. = FALSE)
+        msg)), call. = FALSE)
     }))
   # A transport exception or warning must never carry the request (with its
   # Bearer header) into a condition message (audit R2-B2): scrub before

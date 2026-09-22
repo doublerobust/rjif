@@ -417,10 +417,14 @@ jev_score_many <- function(state_vec, question, ...,
       prev <- tryCatch(readRDS(cache), error = function(e) {
         # The file exists but is not a readable RDS. It may not be a cache at
         # all; refusing beats silently overwriting the caller's bytes.
-        stop("Rjif: cache file '", cache, "' exists but could not be read as ",
+        # (audit r6h R6h-B1: the PATH is caller text -- a key-named cache
+        # file leaked the live key into this message. Redact the completed
+        # text without truncating the contract-bearing tail.)
+        stop(.redact_only(paste0(
+             "Rjif: cache file '", cache, "' exists but could not be read as ",
              "an RDS (", .clean_error_text(conditionMessage(e), 120L),
              "). Nothing was written to it: point 'cache' at a different path, ",
-             "or delete/rename the file if you meant to start over.",
+             "or delete/rename the file if you meant to start over.")),
              call. = FALSE)
       })
       if (.cache_valid(prev, n, cache_fingerprint)) {
@@ -452,12 +456,15 @@ jev_score_many <- function(state_vec, question, ...,
         # mismatched cache is the only prior artifact of a run that may have
         # cost money; silently replacing it (the old behavior) threw it away
         # AND re-billed everything. Stop and let the caller decide.
-        stop("Rjif: cache file '", cache, "' exists but does not match this ",
+        # (audit r6h R6h-B1: redact the path-carrying message without
+        # truncating the "NOT overwritten" promise.)
+        stop(.redact_only(paste0(
+             "Rjif: cache file '", cache, "' exists but does not match this ",
              "run (state contents/order, row count, frame shape, question, ",
              "model, or decision policy). Its previous results are NOT reused ",
              "and its file is NOT overwritten: point 'cache' at a new path for ",
              "this run, or delete/rename the old file if you meant to start ",
-             "over.", call. = FALSE)
+             "over.")), call. = FALSE)
       }
     }
   }
@@ -635,6 +642,46 @@ JSON_OPTS <- list(auto_unbox = TRUE, null = "null")
   do.call(jsonlite::toJSON, c(list(x), opt))
 }
 
+# Render + VALIDATE (audit r6h R6h-B2): a jsonlite::toJSON that RETURNS is
+# not proof of sendable JSON. Invalid UTF-8 bytes marked (or defaulting to)
+# UTF-8 pass through the serializer untouched -- both jsonlite::validate()
+# and validUTF8() reject the output -- and before this helper existed that
+# malformed envelope was hashed into a cache identity, handed to a custom
+# transport callback, answered, cached and resumed, and would have been
+# POSTed as invalid JSON by the real transport. The scan's classed-object
+# skip (r6g-m2) made this reachable by refusing to walk classed lists at
+# all; the plain-list branch still refused, so only wrappers bypassed it.
+# One shared render for identity, preflight, and the transport: every
+# consumer gets the SAME validated bytes or the same refusal.
+.wire_render <- function(x, what) {
+  payload <- tryCatch(
+    as.character(.wire_json(x)),
+    error = function(e) {
+      # Canonical serializer-failure message for the whole package. TWO
+      # phrases are contract-tested and must stay byte-stable: "could not
+      # be serialized" (r6g: jev_eval's pre-transport wrap keeps it when it
+      # re-narrates this text) and "cannot be serialized" (r6f: the batch
+      # path's refusal). Keep .question_identity/.wire_digest routing
+      # through HERE so every consumer gets identical bytes or identical
+      # refusal.
+      stop(.clean_error_text(paste0(
+        "Rjif: ", what, " could not be serialized with the transport's own ",
+        "serializer (", conditionMessage(e), "); the request therefore ",
+        "cannot be serialized into a sendable form, and no cached decision ",
+        "can describe it. Simplify it to plain lists, character vectors, ",
+        "and numbers.")), call. = FALSE)
+    })
+  if (!validUTF8(payload) || !jsonlite::validate(payload)) {
+    stop(.clean_error_text(paste0(
+      "Rjif: ", what, " serialized to text that is not valid JSON/UTF-8 ",
+      "(the serializer emitted invalid byte sequences instead of failing; ",
+      "the API would reject or mis-decode the request). No cached decision ",
+      "can describe it. Re-encode the offending strings (stringi::str_conv ",
+      "or iconv) before scoring.")), call. = FALSE)
+  }
+  payload
+}
+
 # ---- wire-representation cache identity (audit r6f R6f-B1/B2) ----------
 # Digests the object AS THE TRANSPORT WILL SEND IT: the same serializer
 # call and options as .transport_httr's payload line, then md5 over those
@@ -645,8 +692,16 @@ JSON_OPTS <- list(auto_unbox = TRUE, null = "null")
 # WHERE the never-sendable string sits (round 6e's guarantee).
 .wire_digest <- function(x, what) {
   .wire_slot_scan(x, what)   # fail closed, slot-named, before any hashing
-  payload <- tryCatch(as.character(.wire_json(list(.f = x))),
-                      error = function(e) NULL)
+  # validated render (r6h R6h-B2: toJSON that RETURNS is not proof of
+  # sendable JSON). A refusal already worded as a package error (the
+  # validated-render message) passes through with its detail; a raw
+  # serializer exception becomes the generic cannot-be-serialized refusal.
+  payload <- tryCatch(.wire_render(list(.f = x), what),
+                      error = function(e) {
+                        msg <- conditionMessage(e)
+                        if (startsWith(msg, "Rjif: ")) stop(msg, call. = FALSE)
+                        NULL
+                      })
   if (is.null(payload)) {
     stop("Rjif: ", what, " cannot be serialized into a request with the ",
          "transport's own serializer (unknown S3 class, unsupported ",
@@ -742,8 +797,12 @@ JSON_OPTS <- list(auto_unbox = TRUE, null = "null")
 # the serializer twice; stop hand-reimplementing it.
 .question_identity <- function(q) {
   .wire_slot_scan(unclass(q), "question")
-  payload <- tryCatch(as.character(.wire_json(list(q = unclass(q)))),
-                      error = function(e) NULL)
+  payload <- tryCatch(.wire_render(list(q = unclass(q)), "question"),
+                      error = function(e) {
+                        msg <- conditionMessage(e)
+                        if (startsWith(msg, "Rjif: ")) stop(msg, call. = FALSE)
+                        NULL
+                      })
   if (is.null(payload)) {
     stop("Rjif: question cannot be serialized into a request with the ",
          "transport's own serializer (unknown S3 class, unsupported ",
@@ -844,12 +903,23 @@ JSON_OPTS <- list(auto_unbox = TRUE, null = "null")
   tmp <- tempfile(pattern = ".rjif-cache-", tmpdir = dirname(cache))
   on.exit(unlink(tmp), add = TRUE)
   tryCatch({
-    saveRDS(df, tmp)
-    if (!file.rename(tmp, cache)) stop("could not replace cache file")
+    # Audit r6h R6h-B1: saveRDS/connection failures emit their OWN raw
+    # warning ("cannot create file ...") before the package's warning, and
+    # the path in it can carry the live key. Muffle low-level warnings here
+    # -- the package warning below is the caller's report, scrubbed.
+    suppressWarnings({
+      saveRDS(df, tmp)
+      if (!file.rename(tmp, cache)) stop("could not replace cache file")
+    })
   }, error = function(e) {
-    warning("Rjif: could not write cache file '", cache, "' (",
+    # The completed warning text (path included) is redacted without
+    # truncating the "results still returned" promise: the path is caller
+    # text, never rewritten for redaction -- the FILE keeps its name, only
+    # the message is cleaned.
+    warning(.redact_only(paste0(
+            "Rjif: could not write cache file '", cache, "' (",
             .clean_error_text(conditionMessage(e), 120L),
-            "); results still returned, but this chunk was not saved.",
+            "); results still returned, but this chunk was not saved.")),
             call. = FALSE)
     invisible(NULL)
   })

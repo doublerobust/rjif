@@ -198,6 +198,35 @@ promises the 0.0.1 docs already made.
   interpolation, so a criterion named after the API key surfaces as
   `[REDACTED-API-KEY]` (the key already travels inside the request -- the
   invariant is that no ERROR TEXT can carry it out unredacted).
+- Round 6h R6h-B1 (blocker, inherited): the three cache-path diagnostics
+  (unreadable file, fingerprint mismatch, failed write) interpolated the
+  caller's `cache` path into the message before any redaction ran, so a
+  key-named file or directory leaked the live API key into the error text
+  -- the same caller-text invariant R6g-B1 established for class names,
+  at a site round 6g had not looked at. All three now pass the COMPLETED
+  message through exact-key redaction; the write path additionally
+  muffles `saveRDS`'s own low-level warning, which escaped the previous
+  wrap entirely. Redaction for these messages never truncates: the
+  contract phrases ("Nothing was written", "NOT overwritten") are tested
+  intact.
+- Round 6h R6h-B2 (blocker, new in the 6g gate): the pre-transport render
+  proved only that `toJSON` did not THROW. Invalid UTF-8 under a classed
+  wrapper (`I()`, a `data.frame`) renders without an error but emits
+  malformed JSON that jsonlite's own validator rejects, so a callback
+  could answer -- and a cached batch could describe -- a request the real
+  transport could never have POSTed. The fix is structural: ONE helper
+  (`.wire_render`) renders with `JSON_OPTS` and validates
+  (`validUTF8` and `jsonlite::validate`), and the identity digests, the
+  `jev_eval` preflight, and the real transport all go through it -- every
+  consumer gets the same validated bytes or the same refusal.
+  `tests/r16-wire-capture.R` closes the matching evidence gap from the
+  same round: it captures the POST body a loopback server ACTUALLY
+  receives, byte-compares it to the preflight render, and recomputes the
+  cached question/model digests from the server-side JSON parse.
+- Round 6h R6h-n1 (note): redaction of cache-path messages is exact-key
+  plus pattern-based; credential FRAGMENTS are not detected. Documented
+  in `?jev_score_many` rather than defended by a heuristic that would
+  mangle honest paths.
 
 ### Changed
 
